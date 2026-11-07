@@ -1,0 +1,10 @@
+# 金鑰與本機設定，切勿上傳
+.env
+*.env
+run.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,30 @@
+name: 美股台股監控推播
+
+on:
+  schedule:
+    # cron 為 UTC 時間；30 22 * * 1,3,5（UTC）= 台灣時間 週二、四、六 06:30
+    - cron: "30 22 * * 1,3,5"
+  workflow_dispatch: {}   # 允許在 GitHub 網頁手動觸發測試
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安裝相依套件
+        run: pip install -r requirements.txt
+
+      - name: 執行推播
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
+        run: python stock_monitor_line.py
