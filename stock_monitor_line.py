@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V4.2 雲端全自動版 - Flex 卡片排版)
+美股／台股監控推播系統 (V4.3 雲端全自動版 - Flex 字體與按鈕優化)
 ---------------------------------------------------------------------------
-更新日誌 (V4.2): 
-- 將純文字推播全面升級為 LINE Flex Message (彈性卡片)。
-- 強制設定字體大小為 xs (極小)，解決大字體設定導致的擠壓問題。
-- 加入分隔線與行距優化，提升手機閱讀體驗。
+更新日誌 (V4.3): 
+- 內文字體從 xs 放大至 sm，標題放大至 md，平衡閱讀舒適度與排版。
+- 將網頁報表連結改為「可點擊的互動按鈕 (Button)」。
 """
 
 import os
 import sys
 import io
 import csv
-import time
 import json
 import datetime as dt
 from pathlib import Path
@@ -43,15 +41,10 @@ ALERT_TARGETS = [
     "台積電", "聯發科", "元大台灣50"
 ]
 
-PERIODS = [("週", 5), ("月", 21), ("年", 252)]
 MA_WINDOWS = [("MA10", 10), ("MA20", 20), ("MA60", 60), ("MA240", 240)]
-
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
-
-# 雲端 CSV 網址
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRa7RG_nKx8DTBSsOsBPz4MQZPw_mYByDYy7hux2MwuhqRn1VIvqr5XWiZttrW24A/pub?gid=1903088963&single=true&output=csv"
 
-# 檔案路徑
 HERE = Path(__file__).resolve().parent
 PUBLIC_DIR = HERE / "public"
 REPORT_HTML_PATH = PUBLIC_DIR / "index.html"
@@ -97,9 +90,7 @@ def fetch_data(symbols, period="2y"):
     return closes
 
 def pct(new, old): return None if not old else (new / old - 1.0) * 100.0
-
 def compute_ma(series): return {name: round(float(series.rolling(w).mean().iloc[-1]), 2) if len(series) >= w else None for name, w in MA_WINDOWS}
-
 def weekly_ma(series, weeks):
     wk = series.resample("W").last().dropna()
     return round(float(wk.rolling(weeks).mean().iloc[-1]), 2) if len(wk) >= weeks else None
@@ -153,8 +144,6 @@ def export_all_data(closes, watch, kd_data):
         if s is None or len(s) < 252: continue
         
         last = s.iloc[-1]
-        dt_last = s.index[-1].strftime("%Y-%m-%d")
-        
         pct_1d = pct(last, s.iloc[-2]) if len(s) >= 2 else None
         pct_1w = pct(last, s.iloc[-6]) if len(s) >= 6 else None
         pct_1m = pct(last, s.iloc[-22]) if len(s) >= 22 else None
@@ -162,7 +151,6 @@ def export_all_data(closes, watch, kd_data):
         
         ma = compute_ma(s)
         ma20w = weekly_ma(s, 20)
-        
         kd = kd_data.get(sym, {})
         kd_d = kd.get("日", (None, None))
         kd_w = kd.get("週", (None, None))
@@ -170,7 +158,7 @@ def export_all_data(closes, watch, kd_data):
         
         row = {
             "序號": i, "群組": t["group"], "市場": t["market"], "代碼": t["code"],
-            "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2), "資料日期": dt_last,
+            "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2), "資料日期": s.index[-1].strftime("%Y-%m-%d"),
             "當日%": round(pct_1d, 2) if pct_1d is not None else None,
             "週%": round(pct_1w, 2) if pct_1w is not None else None,
             "月%": round(pct_1m, 2) if pct_1m is not None else None,
@@ -192,7 +180,7 @@ def generate_html_report(df, vix_hist):
         f.write(html)
 
 # ---------------------------------------------------------------------------
-# V4.2 新增：組裝 LINE Flex Message 卡片
+# 組裝 LINE Flex Message 卡片 (V4.3 字體與按鈕升級)
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist):
     today = dt.datetime.now()
@@ -293,20 +281,19 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     if alerts: sec4.extend(alerts)
     else: sec4.append("*(今日無觸發)*")
 
-    # === 收集第 5 區段文字 ===
-    report_url = os.environ.get("GITHUB_PAGES_URL", "https://ckliu60.github.io/stock-monitor/").strip()
-    sec5 = [f"👉 詳細個股網頁報表：", report_url]
-
-    # === 建立卡片內文小區塊 (強制字體 xs) ===
+    # === 建立卡片內文小區塊 (V4.3 字體放大為 sm) ===
     def create_box(lines, color="#333333"):
         return {
             "type": "text",
             "text": "\n".join(lines),
-            "size": "xs",          # 【重點】強制縮小字體 (xs = extra small 極小)
-            "wrap": True,          # 允許換行
+            "size": "sm",          # 改成 sm (小)，比原本的 xs 大一號，更易閱讀
+            "wrap": True,
             "color": color,
-            "lineSpacing": "4px"   # 增加行距，避免字太小擠在一起
+            "lineSpacing": "4px"
         }
+
+    # === V4.3 新增網址專屬互動按鈕 ===
+    report_url = os.environ.get("GITHUB_PAGES_URL", "https://ckliu60.github.io/stock-monitor/").strip()
 
     # === 組合出 Flex Message JSON 結構 ===
     flex_payload = {
@@ -324,7 +311,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                         "type": "text",
                         "text": f"📊 股市核心快報 {today.month:02d}/{today.day:02d} ({wd})",
                         "weight": "bold",
-                        "size": "sm",
+                        "size": "md",   # 標題也順勢放大到 md (中)
                         "color": "#1f3b66"
                     },
                     {"type": "separator", "margin": "md"},
@@ -336,7 +323,18 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                     {"type": "separator", "margin": "md"},
                     create_box(sec4),
                     {"type": "separator", "margin": "md"},
-                    create_box(sec5, color="#1456b8")
+                    # 專屬網頁連結按鈕
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#1456b8",
+                        "height": "sm",
+                        "action": {
+                            "type": "uri",
+                            "label": "👉 開啟詳細網頁報表",
+                            "uri": report_url
+                        }
+                    }
                 ]
             }
         }
@@ -371,11 +369,9 @@ def main():
                 kd_data[sym] = kd_timeframes(df)
     except: pass
 
-    # 1. 匯出報表
     df_report = export_all_data(closes, watch, kd_data)
     generate_html_report(df_report, vix_hist)
 
-    # 2. 推播 Flex Message 至 LINE
     flex_message = build_flex_message(closes, watch, kd_data, vix_hist)
 
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -385,7 +381,6 @@ def main():
         print("[DRY-RUN] 訊息預覽 JSON：\n" + json.dumps(flex_message, indent=2, ensure_ascii=False) + "\n")
         return 0
 
-    # 發送 JSON 給 LINE API (改為發送 Flex 格式)
     resp = requests.post(LINE_PUSH_URL, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                          json={"to": uid, "messages": [flex_message]}, timeout=20)
     
