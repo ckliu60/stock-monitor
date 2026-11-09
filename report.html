@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>美股／台股監控 11/07</title>
+<style>
+  :root { --up:#d32f2f; --down:#1b8e3a; --line:#e3e6ea; --mute:#8a9099; --head:#1f3b66; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#f6f7f9; color:#222;
+    font-family:"Microsoft JhengHei","PingFang TC",system-ui,sans-serif; font-size:13px; }
+  .wrap { max-width:720px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; margin:4px 0; }
+  h2 { font-size:14px; margin:18px 0 6px; color:var(--head);
+    border-left:4px solid var(--head); padding-left:8px; }
+  .sub { color:var(--mute); font-size:12px; margin-bottom:6px; }
+  table { width:100%; border-collapse:collapse; background:#fff;
+    border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th,td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
+  thead th { background:#eef1f5; color:#333; font-weight:600; font-size:12px; }
+  thead th.num { text-align:center; }
+  thead th small { color:var(--mute); font-weight:400; font-size:10px; }
+  tbody tr:last-child td { border-bottom:none; }
+  td.num { text-align:center; font-variant-numeric:tabular-nums; }
+  td.idx { color:var(--mute); width:30px; text-align:center; }
+  td.name { white-space:normal; }
+  .code { color:var(--mute); font-size:11px; }
+  .date { color:var(--mute); }
+  .up { color:var(--up); } .down { color:var(--down); } .mute { color:var(--mute); }
+  tr.grp td { background:#f0f3f7; font-weight:700; color:var(--head); }
+  .light { background:#fff; border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; margin:6px 0 0; font-size:13px; }
+  .light b { font-size:14px; }
+  ol.news { margin:4px 0 0; padding-left:20px; }
+  ol.news li { margin:5px 0; line-height:1.5; }
+  ol.news a { color:#1456b8; text-decoration:none; }
+  ol.news a:hover { text-decoration:underline; }
+  .foot a { color:#1456b8; }
+  td.light-cell { white-space:nowrap; text-align:center; }
+  ul.over { list-style:none; padding:0; margin:0; }
+  ul.over li { background:#fff; border:1px solid var(--line); border-radius:6px;
+    padding:6px 10px; margin-bottom:4px; }
+  .foot { color:var(--mute); font-size:11px; margin-top:14px; line-height:1.6; }
+</style></head>
+<body><div class="wrap">
+  <h1>📊 美股／台股監控</h1>
+  <div class="sub">2026/11/07（六）　產生時間 2026/11/07 19:54</div>
+
+  <h2>大盤狀況</h2>
+  <table><thead><tr><th>指數</th><th class="num">收盤</th><th class="num">當日</th><th class="num">燈號</th></tr></thead>
+  <tbody><tr><td><a href="https://finance.yahoo.com/quote/^DJI" target="_blank">道瓊</a></td><td class="num">51,286</td><td class="num down">▼0.5%</td><td class="light-cell">⚪ 平常</td></tr><tr><td><a href="https://finance.yahoo.com/quote/^IXIC" target="_blank">那斯達克</a></td><td class="num">24,579</td><td class="num up">▲1.1%</td><td class="light-cell">⚪ 平常</td></tr><tr><td><a href="https://finance.yahoo.com/quote/^GSPC" target="_blank">S&P500</a></td><td class="num">7,377</td><td class="num up">▲0.3%</td><td class="light-cell">⚪ 平常</td></tr><tr><td><a href="https://finance.yahoo.com/quote/^SOX" target="_blank">費半</a></td><td class="num">9,390</td><td class="num up">▲4.2%</td><td class="light-cell">🔴 大喜</td></tr></tbody></table>
+
+  <h2>個股（最新收盤 11/06／日漲跌／漲跌幅 週·月·年）</h2>
+  <table><thead><tr><th class="num">#</th><th>名稱</th><th class="num">收盤</th><th class="num">當日</th>
+  <th class="num">週<br><small>≈10/31</small></th><th class="num">月<br><small>≈10/08</small></th>
+  <th class="num">年<br><small>≈2025/11</small></th></tr></thead>
+  <tbody><tr class="grp"><td colspan="7">美股</td></tr><tr><td class="num idx">1</td><td class="name"><a href="https://finance.yahoo.com/quote/TSM" target="_blank">台積電ADR</a> <span class="code">TSM</span></td><td class="num">375.44</td><td class="num up">▲6.3%</td><td class="num down">▼7.6%</td><td class="num down">▼18.0%</td><td class="num up">▲29.2%</td></tr><tr><td class="num idx">2</td><td class="name"><a href="https://finance.yahoo.com/quote/NVDA" target="_blank">輝達</a> <span class="code">NVDA</span></td><td class="num">186.64</td><td class="num up">▲2.8%</td><td class="num down">▼8.8%</td><td class="num down">▼19.0%</td><td class="num down">▼4.2%</td></tr><tr><td class="num idx">3</td><td class="name"><a href="https://finance.yahoo.com/quote/INTC" target="_blank">英特爾</a> <span class="code">INTC</span></td><td class="num">56.28</td><td class="num up">▲7.7%</td><td class="num down">▼14.4%</td><td class="num down">▼47.4%</td><td class="num up">▲46.6%</td></tr><tr><td class="num idx">4</td><td class="name"><a href="https://finance.yahoo.com/quote/MRVL" target="_blank">邁威爾</a> <span class="code">MRVL</span></td><td class="num">141.20</td><td class="num up">▲5.7%</td><td class="num down">▼28.1%</td><td class="num down">▼48.6%</td><td class="num up">▲52.2%</td></tr><tr><td class="num idx">5</td><td class="name"><a href="https://finance.yahoo.com/quote/PLTR" target="_blank">Palantir</a> <span class="code">PLTR</span></td><td class="num">160.38</td><td class="num up">▲3.5%</td><td class="num down">▼12.9%</td><td class="num down">▼19.3%</td><td class="num down">▼14.6%</td></tr><tr><td class="num idx">6</td><td class="name"><a href="https://finance.yahoo.com/quote/TSLA" target="_blank">特斯拉</a> <span class="code">TSLA</span></td><td class="num">358.22</td><td class="num up">▲4.2%</td><td class="num down">▼10.4%</td><td class="num down">▼4.5%</td><td class="num down">▼22.5%</td></tr><tr><td class="num idx">7</td><td class="name"><a href="https://finance.yahoo.com/quote/SPCX" target="_blank">SpaceX</a> <span class="code">SPCX</span></td><td class="num">134.27</td><td class="num up">▲8.6%</td><td class="num down">▼0.3%</td><td class="num down">▼16.4%</td><td class="num mute">—</td></tr><tr><td class="num idx">8</td><td class="name"><a href="https://finance.yahoo.com/quote/AMD" target="_blank">超微</a> <span class="code">AMD</span></td><td class="num">449.04</td><td class="num up">▲11.0%</td><td class="num down">▼11.0%</td><td class="num down">▼27.7%</td><td class="num up">▲75.2%</td></tr><tr><td class="num idx">9</td><td class="name"><a href="https://finance.yahoo.com/quote/MSFT" target="_blank">微軟</a> <span class="code">MSFT</span></td><td class="num">530.61</td><td class="num down">▼1.0%</td><td class="num up">▲1.7%</td><td class="num up">▲1.5%</td><td class="num up">▲5.5%</td></tr><tr><td class="num idx">10</td><td class="name"><a href="https://finance.yahoo.com/quote/GOOG" target="_blank">Alphabet</a> <span class="code">GOOG</span></td><td class="num">283.93</td><td class="num up">▲0.8%</td><td class="num up">▲2.1%</td><td class="num down">▼17.7%</td><td class="num down">▼0.0%</td></tr><tr><td class="num idx">11</td><td class="name"><a href="https://finance.yahoo.com/quote/META" target="_blank">Meta</a> <span class="code">META</span></td><td class="num">610.15</td><td class="num up">▲0.8%</td><td class="num down">▼0.8%</td><td class="num down">▼15.4%</td><td class="num down">▼3.7%</td></tr><tr><td class="num idx">12</td><td class="name"><a href="https://finance.yahoo.com/quote/NOK" target="_blank">諾基亞</a> <span class="code">NOK</span></td><td class="num">7.66</td><td class="num up">▲2.7%</td><td class="num down">▼10.5%</td><td class="num down">▼24.5%</td><td class="num up">▲11.8%</td></tr><tr><td class="num idx">13</td><td class="name"><a href="https://finance.yahoo.com/quote/BTC-USD" target="_blank">比特幣</a> <span class="code">BTC-USD</span></td><td class="num">75,933.91</td><td class="num up">▲0.2%</td><td class="num down">▼1.0%</td><td class="num down">▼6.7%</td><td class="num up">▲13.3%</td></tr><tr class="grp"><td colspan="7">台股</td></tr><tr><td class="num idx">14</td><td class="name"><a href="https://finance.yahoo.com/quote/2330.TW" target="_blank">台積電</a> <span class="code">2330</span></td><td class="num">2,135.00</td><td class="num down">▼4.7%</td><td class="num down">▼9.9%</td><td class="num down">▼17.4%</td><td class="num up">▲48.0%</td></tr><tr><td class="num idx">15</td><td class="name"><a href="https://finance.yahoo.com/quote/2454.TW" target="_blank">聯發科</a> <span class="code">2454</span></td><td class="num">3,390.00</td><td class="num down">▼2.0%</td><td class="num down">▼13.4%</td><td class="num down">▼31.1%</td><td class="num up">▲161.4%</td></tr><tr><td class="num idx">16</td><td class="name"><a href="https://finance.yahoo.com/quote/0050.TW" target="_blank">元大台灣50</a> <span class="code">0050</span></td><td class="num">92.50</td><td class="num down">▼4.8%</td><td class="num down">▼11.9%</td><td class="num down">▼20.6%</td><td class="num up">▲50.5%</td></tr><tr><td class="num idx">17</td><td class="name"><a href="https://finance.yahoo.com/quote/0052.TW" target="_blank">富邦科技</a> <span class="code">0052</span></td><td class="num">53.15</td><td class="num down">▼4.9%</td><td class="num down">▼12.6%</td><td class="num down">▼21.8%</td><td class="num up">▲51.4%</td></tr><tr><td class="num idx">18</td><td class="name"><a href="https://finance.yahoo.com/quote/00919.TW" target="_blank">群益台灣精選高息</a> <span class="code">00919</span></td><td class="num">30.14</td><td class="num down">▼3.4%</td><td class="num down">▼7.5%</td><td class="num down">▼5.2%</td><td class="num up">▲59.2%</td></tr></tbody></table>
+
+  <h2>超跌警示（跌幅 ≥30%）</h2>
+  <ul class='over'><li>⚡ <b>邁威爾</b> MRVL　月線 ▼48.6%</li><li>⚡ <b>英特爾</b> INTC　月線 ▼47.4%</li><li>⚡ <b>聯發科</b> 2454　月線 ▼31.1%</li></ul>
+
+  <h2>市場新聞（Yahoo 財經）</h2>
+  <ol class="news"><li><a href="https://tw.news.yahoo.com/%E5%8F%B0%E6%8C%87%E6%9C%9F%E5%A4%9C%E7%9B%A4%E6%94%B6%E5%BE%A94%E8%90%AC%E9%BB%9E-%E5%A4%96%E8%B3%87%E6%9A%97%E4%B8%AD%E5%B8%83%E5%B1%80-%E4%B8%8B%E9%80%B116%E6%AA%94-%E9%BB%91%E9%A6%AC%E8%82%A1-%E6%9B%9D%E5%85%89-112359993.html" target="_blank">台指期夜盤收復4萬點！外資暗中布局　下週16檔「黑馬股」曝光</a></li><li><a href="https://tw.stock.yahoo.com/news/%E7%BE%8E%E5%9C%8B%E6%B0%91%E7%9C%BE%E5%8F%8D%E5%BD%88-ai-%E8%88%87%E8%B3%87%E6%96%99%E4%B8%AD%E5%BF%83-%E5%9C%B0%E6%96%B9%E6%8A%95%E7%A5%A8%E6%8B%92%E5%BB%BA%E9%A1%AF%E6%86%82%E6%85%AE-111909846.html" target="_blank">美國民眾反彈 AI 與資料中心 地方投票拒建顯憂慮</a></li><li><a href="https://tw.stock.yahoo.com/news/%E7%A7%91%E6%8A%80%E8%82%A1%E6%B3%A2%E5%8B%95%E5%8A%A0%E5%8A%87-%E5%AF%A6%E7%89%A9%E8%B3%87%E7%94%A2etf%E6%88%90%E9%81%BF%E9%9A%AA%E6%96%B0%E9%81%B8%E6%93%87-105912398.html" target="_blank">科技股波動加劇 實物資產ETF成避險新選擇</a></li><li><a href="https://tw.stock.yahoo.com/news/%E7%BE%8E%E6%9C%9F%E4%B8%AD%E9%81%B8%E8%88%89%E9%87%8D%E5%A1%91fed%E6%94%BF%E7%AD%96%E7%A9%BA%E9%96%93-%E8%8F%AF%E8%A8%B1%E5%8D%87%E6%81%AF%E9%98%BB%E5%8A%9B%E9%99%8D%E4%BD%8E-%E4%BD%86%E7%B6%93%E6%BF%9F%E5%8F%AF%E8%83%BD%E4%B8%8D%E5%86%8D%E9%9C%80%E8%A6%81%E6%9B%B4%E9%AB%98%E5%88%A9%E7%8E%87-104003789.html" target="_blank">美期中選舉重塑Fed政策空間！華許升息阻力降低 但經濟可能不再需要更高利率</a></li><li><a href="https://tw.stock.yahoo.com/news/ai%E9%8C%A2%E5%8C%85%E7%AE%A1%E5%AE%B6%E6%83%B9%E8%AD%B0-%E9%80%BE%E4%B8%83%E6%88%90%E7%BE%8E%E5%9C%8B%E6%B0%91%E7%9C%BE%E4%B8%8D%E9%A1%98ai%E5%8B%95%E7%94%A8%E8%B3%87%E9%87%91-103454896.html" target="_blank">AI錢包管家惹議：逾七成美國民眾不願AI動用資金</a></li></ol>
+
+  <div class="foot">
+  股價來源網頁：<a href="https://finance.yahoo.com/" target="_blank">finance.yahoo.com</a>（點股名可開個股頁）。<br>
+  背後統計表：<a href="report_data.csv">report_data.csv</a>　｜　監控清單：<a href="watchlist.csv">watchlist.csv</a><br>
+  紅＝漲、綠＝跌（台股慣例）。週/月/年為還原（含息）報酬。</div>
+</div></body></html>
