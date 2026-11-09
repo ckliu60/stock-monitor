@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V4.5 雲端全自動版 - 完整網頁與卡片版)
+美股／台股監控推播系統 (V4.6 雲端全自動版 - 漲跌點數與標題優化)
 ---------------------------------------------------------------------------
-更新日誌 (V4.5): 
-- 結合 V4.4 的精美 Flex 卡片與修復後的按鈕連結。
-- 補回詳細版本的 HTML 網頁報表 (包含表格、均線與漲跌幅燈號)。
+更新日誌 (V4.6): 
+- 區塊一標題新增 (+/- 2%) 標示。
+- 區塊一個股與指數括號內新增「漲跌點數/價錢」，格式為 (漲跌點數 ; 漲跌幅)。
 """
 
 import os
@@ -130,7 +130,7 @@ def fmt_pct(v):
     return f"{'▲' if v>0 else '▼' if v<0 else ''}{abs(v):.1f}%"
 
 # ---------------------------------------------------------------------------
-# 匯出與報表生成 (V4.5 補回詳細的網頁排版)
+# 匯出與報表生成
 # ---------------------------------------------------------------------------
 def export_all_data(closes, watch, kd_data):
     all_targets = [{"market": "美股", "code": s, "name": n, "yf": s, "group": "核心"} for s, n in INDICES] + \
@@ -239,7 +239,7 @@ def generate_html_report(df, vix_hist):
     if not over_sold:
         html += "<li style='background:#fff; border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin-bottom:4px;'>✅ 今日無標的觸發超跌警示。</li>"
 
-    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V4.5 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
+    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V4.6 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
     
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
@@ -252,13 +252,15 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     wd = "一二三四五六日"[today.weekday()]
     
     # === 收集第 1 區段文字 ===
-    sec1 = ["▌一、大盤與核心狀況"]
+    sec1 = ["▌一、大盤與核心狀況 (+/- 2%)"]
     for i, (sym, name) in enumerate(INDICES, 1):
         s = closes.get(sym)
         if s is not None and len(s) >= 2:
             last, prev = s.iloc[-1], s.iloc[-2]
+            diff = last - prev
             dchg = pct(last, prev)
-            sec1.append(f"{i}. {name} {last:,.0f} ({fmt_pct(dchg)}) {get_weather(dchg)}")
+            # 大盤指數不顯示小數點
+            sec1.append(f"{i}. {name} {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
             
     sec1.append("-" * 15)
     core_items = []
@@ -268,8 +270,10 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     
     if s_twii is not None and len(s_twii) >= 2:
         last, prev = s_twii.iloc[-1], s_twii.iloc[-2]
+        diff = last - prev
         dchg = pct(last, prev)
-        sec1.append(f"{item_idx}. 台股大盤 {last:,.0f} ({fmt_pct(dchg)}) {get_weather(dchg)}")
+        # 台股大盤不顯示小數點
+        sec1.append(f"{item_idx}. 台股大盤 {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
         core_items.append({"name": "台股大盤", "yf": "^TWII", "last": last, "ma20w": weekly_ma(s_twii, 20)})
         item_idx += 1
     
@@ -281,9 +285,11 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             s = closes.get(sym)
             if s is not None and len(s) >= 2:
                 last, prev = s.iloc[-1], s.iloc[-2]
+                diff = last - prev
                 dchg = pct(last, prev)
                 display_name = w["name"] if "0050" not in sym or "元大" in w["name"] else "元大台灣50"
-                sec1.append(f"{item_idx}. {display_name} {last:,.1f} ({fmt_pct(dchg)}) {get_weather(dchg)}")
+                # 個股保留一位小數，格式如 (+15.0 ; ▲1.5%)
+                sec1.append(f"{item_idx}. {display_name} {last:,.1f} ({diff:+,.1f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
                 core_items.append({"name": display_name, "yf": sym, "last": last, "ma20w": weekly_ma(s, 20)})
                 item_idx += 1
 
