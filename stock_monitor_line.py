@@ -292,8 +292,8 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             "lineSpacing": "4px"
         }
 
-    # === V4.3 新增網址專屬互動按鈕 ===
-    report_url = os.environ.get("GITHUB_PAGES_URL", "https://ckliu60.github.io/stock-monitor/").strip()
+# === V4.3 新增網址專屬互動按鈕 ===
+report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.github.io/stock-monitor/"
 
     # === 組合出 Flex Message JSON 結構 ===
     flex_payload = {
