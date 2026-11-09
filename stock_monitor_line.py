@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V4.3 雲端全自動版 - Flex 字體與按鈕優化)
+美股／台股監控推播系統 (V4.4 雲端全自動版 - 按鈕連結修復)
 ---------------------------------------------------------------------------
-更新日誌 (V4.3): 
-- 內文字體從 xs 放大至 sm，標題放大至 md，平衡閱讀舒適度與排版。
-- 將網頁報表連結改為「可點擊的互動按鈕 (Button)」。
+更新日誌 (V4.4): 
+- 修正 Flex Message 中 Button 網址因變數為空而導致推播失敗的問題。
+- 確保所有縮排正確無誤。
 """
 
 import os
@@ -180,7 +180,7 @@ def generate_html_report(df, vix_hist):
         f.write(html)
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片 (V4.3 字體與按鈕升級)
+# 組裝 LINE Flex Message 卡片
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist):
     today = dt.datetime.now()
@@ -281,19 +281,19 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     if alerts: sec4.extend(alerts)
     else: sec4.append("*(今日無觸發)*")
 
-    # === 建立卡片內文小區塊 (V4.3 字體放大為 sm) ===
+    # === 建立卡片內文小區塊 (sm) ===
     def create_box(lines, color="#333333"):
         return {
             "type": "text",
             "text": "\n".join(lines),
-            "size": "sm",          # 改成 sm (小)，比原本的 xs 大一號，更易閱讀
+            "size": "sm",
             "wrap": True,
             "color": color,
             "lineSpacing": "4px"
         }
 
-# === V4.3 新增網址專屬互動按鈕 ===
-report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.github.io/stock-monitor/"
+    # === 防止網址為空的終極防禦 (V4.4 修正點) ===
+    report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.github.io/stock-monitor/"
 
     # === 組合出 Flex Message JSON 結構 ===
     flex_payload = {
@@ -311,7 +311,7 @@ report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.
                         "type": "text",
                         "text": f"📊 股市核心快報 {today.month:02d}/{today.day:02d} ({wd})",
                         "weight": "bold",
-                        "size": "md",   # 標題也順勢放大到 md (中)
+                        "size": "md",
                         "color": "#1f3b66"
                     },
                     {"type": "separator", "margin": "md"},
