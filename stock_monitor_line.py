@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V4.8 雲端全自動版 - 最終排版微調)
+美股／台股監控推播系統 (V5.0 雲端全自動版 - 核心指標價格加括弧)
 ---------------------------------------------------------------------------
-更新日誌 (V4.8): 
-- VIX 區塊的數值比較文字，明確改為「昨日」與「前一週」。
+更新日誌 (V5.0): 
+- 核心指標區塊：標題最新價格外層加上括弧，如「1. 台股大盤 (41,662)」。
+- 整合 V4.9 的美股代碼防呆與台 VIX 缺值防呆。
 """
 
 import os
@@ -68,8 +69,18 @@ def load_watchlist():
         code = (raw.get("code") or "").strip()
         yf_symbol = (raw.get("yf_symbol") or "").strip()
         market = (raw.get("market") or "").strip()
+        
+        # 美股與台股代碼防呆處理
         if not yf_symbol:
-            yf_symbol = f"{code}.TW" if (market=="台股" or code.isdigit()) else code
+            if market == "台股" or code.isdigit():
+                yf_symbol = f"{code}.TW"
+            else:
+                # 美股若有小數點（如 BRK.B）自動轉為 Yahoo 格式（BRK-B）
+                yf_symbol = code.replace(".", "-")
+        else:
+            if market == "美股":
+                yf_symbol = yf_symbol.replace(".", "-")
+
         rows.append({
             "market": market, "code": code, "yf_symbol": yf_symbol,
             "name": (raw.get("name") or yf_symbol).strip(),
@@ -202,8 +213,12 @@ def generate_html_report(df, vix_hist):
         
     for v_name, v_sym in [("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")]:
         h = vix_hist.get(v_sym, [0])
-        status = "🟢安全" if h[0] < 35 else "🔴恐慌"
-        html += f"<tr><td>{v_name}</td><td class='num'>{h[0]:.2f}</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
+        val = h[0]
+        if val is None or val <= 0:
+            html += f"<tr><td>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
+        else:
+            status = "🟢安全" if val < 35 else "🔴恐慌"
+            html += f"<tr><td>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
         
     html += "</tbody></table></div><h2>個股追蹤清單</h2><div style='overflow-x:auto;'><table><thead><tr><th class='num'>#</th><th>名稱</th><th class='num'>收盤</th><th class='num'>當日</th><th class='num'>週<small>(約5日)</small></th><th class='num'>月<small>(約21日)</small></th><th class='num'>年<small>(約252日)</small></th></tr></thead><tbody><tr class='grp'><td colspan='7'>美股觀察區</td></tr>"
       
@@ -238,7 +253,7 @@ def generate_html_report(df, vix_hist):
     if not over_sold:
         html += "<li style='background:#fff; border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin-bottom:4px;'>✅ 今日無標的觸發超跌警示。</li>"
 
-    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V4.8 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
+    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V5.0 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
     
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
@@ -258,7 +273,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             last, prev = s.iloc[-1], s.iloc[-2]
             diff = last - prev
             dchg = pct(last, prev)
-            # 大盤指數不顯示小數點
             sec1.append(f"{i}. {name} {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
             
     sec1.append("-" * 15)
@@ -271,7 +285,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         last, prev = s_twii.iloc[-1], s_twii.iloc[-2]
         diff = last - prev
         dchg = pct(last, prev)
-        # 台股大盤不顯示小數點
         sec1.append(f"{item_idx}. 台股大盤 {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
         core_items.append({"name": "台股大盤", "yf": "^TWII", "last": last, "ma20w": weekly_ma(s_twii, 20)})
         item_idx += 1
@@ -287,20 +300,27 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 diff = last - prev
                 dchg = pct(last, prev)
                 display_name = w["name"] if "0050" not in sym or "元大" in w["name"] else "元大台灣50"
-                # 個股保留一位小數
                 sec1.append(f"{item_idx}. {display_name} {last:,.1f} ({diff:+,.1f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
                 core_items.append({"name": display_name, "yf": sym, "last": last, "ma20w": weekly_ma(s, 20)})
                 item_idx += 1
 
-    # === 收集第 2 區段文字 (V4.8 修改為「昨日」與「前一週」) ===
+    # === 收集第 2 區段文字 ===
     sec2 = ["▌二、VIX 恐慌指數 (<35)"]
     for i, (v_name, v_sym) in enumerate([("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")], 1):
-        h = vix_hist.get(v_sym, [0,0,0,0])
-        status = "🟢安全" if h[0] < 35 else "🔴恐慌"
-        # h[0]=今日, h[1]=昨日, h[3]=約上週
-        sec2.append(f"{i}. {v_name} {h[0]:.1f}({status}), 昨日{h[1]:.1f}, 前一週{h[3]:.1f}")
+        h = vix_hist.get(v_sym, [0, 0, 0, 0])
+        val_today = h[0]
+        val_yest = h[1]
+        val_prev_w = h[3]
+        
+        if val_today is None or val_today <= 0:
+            sec2.append(f"{i}. {v_name} — (暫無報價)")
+        else:
+            status = "🟢安全" if val_today < 35 else "🔴恐慌"
+            yest_str = f"昨日{val_yest:.1f}" if (val_yest and val_yest > 0) else "昨日—"
+            prev_w_str = f"前一週{val_prev_w:.1f}" if (val_prev_w and val_prev_w > 0) else "前一週—"
+            sec2.append(f"{i}. {v_name} {val_today:.1f}({status}), {yest_str}, {prev_w_str}")
 
-    # === 收集第 3 區段文字 ===
+    # === 收集第 3 區段文字 (V5.0: 標題價格加上括弧) ===
     sec3 = ["▌三、台股核心指標 (K<20)"]
     for i, item in enumerate(core_items, 1):
         kd = kd_data.get(item["yf"], {})
@@ -311,8 +331,8 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         last = item["last"]
         ma20w = item["ma20w"]
         
-        # 標題加上最新股價
-        price_fmt = f"{last:,.0f}" if item["yf"] == "^TWII" else f"{last:,.1f}"
+        # 標題加上括弧格式：例如 (41,662) 或 (2,235.0)
+        price_fmt = f"({last:,.0f})" if item["yf"] == "^TWII" else f"({last:,.1f})"
         sec3.append(f"{i}. {item['name']} {price_fmt}")
         sec3.append(f"   K值: 日{int(kd_d) if kd_d else '-'} / 週{int(kd_w) if kd_w else '-'} / 月{int(kd_m) if kd_m else '-'}")
         
@@ -325,7 +345,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 elif kd_m and kd_m < 20: status = "🟢 月K超跌"
                 else: status = "✓ 線上安全"
                 
-            # 計算 20週均線 數值格式
             ma_fmt = f"{ma20w:,.0f}" if item["yf"] == "^TWII" else f"{ma20w:,.1f}"
             sec3.append(f"   距20週均({ma_fmt}): {dist:+.1f}% ({status})")
 
@@ -358,7 +377,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     if alerts: sec4.extend(alerts)
     else: sec4.append("*(今日無觸發)*")
 
-    # === 建立卡片內文小區塊 (sm) ===
     def create_box(lines, color="#333333"):
         return {
             "type": "text",
@@ -369,10 +387,8 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             "lineSpacing": "4px"
         }
 
-    # === 防止網址為空的終極防禦 ===
     report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.github.io/stock-monitor/"
 
-    # === 組合出 Flex Message JSON 結構 ===
     flex_payload = {
         "type": "flex",
         "altText": f"📊 股市快報 {today.month:02d}/{today.day:02d} 已送達",
@@ -400,7 +416,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                     {"type": "separator", "margin": "md"},
                     create_box(sec4),
                     {"type": "separator", "margin": "md"},
-                    # 專屬網頁連結按鈕
                     {
                         "type": "button",
                         "style": "primary",
@@ -433,8 +448,10 @@ def main():
         s = v_data.get(v_sym)
         if s is not None and len(s) >= 6:
             vix_hist[v_sym] = [s.iloc[-1], s.iloc[-2], s.iloc[-3], s.iloc[-6]]
+        elif s is not None and len(s) > 0:
+            vix_hist[v_sym] = [s.iloc[-1], 0, 0, 0]
         else:
-            vix_hist[v_sym] = [0,0,0,0]
+            vix_hist[v_sym] = [0, 0, 0, 0]
 
     kd_data = {}
     try:
