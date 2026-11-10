@@ -2,6 +2,8 @@ name: Stock Monitor Daily Report
 
 on:
   schedule:
+    # GitHub 使用 UTC 時間，比台灣慢 8 小時
+    # UTC 22:30 = 台灣時間隔天早上 06:30
     - cron: '30 22 * * *'
   workflow_dispatch:
 
