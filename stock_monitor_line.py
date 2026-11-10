@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V4.6 雲端全自動版 - 漲跌點數與標題優化)
+美股／台股監控推播系統 (V4.8 雲端全自動版 - 最終排版微調)
 ---------------------------------------------------------------------------
-更新日誌 (V4.6): 
-- 區塊一標題新增 (+/- 2%) 標示。
-- 區塊一個股與指數括號內新增「漲跌點數/價錢」，格式為 (漲跌點數 ; 漲跌幅)。
+更新日誌 (V4.8): 
+- VIX 區塊的數值比較文字，明確改為「昨日」與「前一週」。
 """
 
 import os
@@ -16,7 +15,7 @@ import json
 import datetime as dt
 from pathlib import Path
 
-# 強制關閉 curl_cffi 避免 DNS 逾時，改回標準 requests
+# 強制關閉 curl_cffi 避免 DNS 逾時
 os.environ["YFINANCE_CACHE_DIR"] = ""
 os.environ["CURL_CA_BUNDLE"] = ""
 
@@ -239,7 +238,7 @@ def generate_html_report(df, vix_hist):
     if not over_sold:
         html += "<li style='background:#fff; border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin-bottom:4px;'>✅ 今日無標的觸發超跌警示。</li>"
 
-    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V4.6 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
+    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V4.8 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
     
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
@@ -288,17 +287,18 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 diff = last - prev
                 dchg = pct(last, prev)
                 display_name = w["name"] if "0050" not in sym or "元大" in w["name"] else "元大台灣50"
-                # 個股保留一位小數，格式如 (+15.0 ; ▲1.5%)
+                # 個股保留一位小數
                 sec1.append(f"{item_idx}. {display_name} {last:,.1f} ({diff:+,.1f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
                 core_items.append({"name": display_name, "yf": sym, "last": last, "ma20w": weekly_ma(s, 20)})
                 item_idx += 1
 
-    # === 收集第 2 區段文字 ===
+    # === 收集第 2 區段文字 (V4.8 修改為「昨日」與「前一週」) ===
     sec2 = ["▌二、VIX 恐慌指數 (<35)"]
     for i, (v_name, v_sym) in enumerate([("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")], 1):
         h = vix_hist.get(v_sym, [0,0,0,0])
         status = "🟢安全" if h[0] < 35 else "🔴恐慌"
-        sec2.append(f"{i}. {v_name} {h[0]:.1f} ({status})")
+        # h[0]=今日, h[1]=昨日, h[3]=約上週
+        sec2.append(f"{i}. {v_name} {h[0]:.1f}({status}), 昨日{h[1]:.1f}, 前一週{h[3]:.1f}")
 
     # === 收集第 3 區段文字 ===
     sec3 = ["▌三、台股核心指標 (K<20)"]
@@ -308,11 +308,14 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         kd_w = kd.get("週", (None,))[0]
         kd_m = kd.get("月", (None,))[0]
         
-        sec3.append(f"{i}. {item['name']}")
-        sec3.append(f"   K值: 日{int(kd_d) if kd_d else '-'} / 週{int(kd_w) if kd_w else '-'} / 月{int(kd_m) if kd_m else '-'}")
-        
         last = item["last"]
         ma20w = item["ma20w"]
+        
+        # 標題加上最新股價
+        price_fmt = f"{last:,.0f}" if item["yf"] == "^TWII" else f"{last:,.1f}"
+        sec3.append(f"{i}. {item['name']} {price_fmt}")
+        sec3.append(f"   K值: 日{int(kd_d) if kd_d else '-'} / 週{int(kd_w) if kd_w else '-'} / 月{int(kd_m) if kd_m else '-'}")
+        
         if last and ma20w:
             dist = (last - ma20w) / ma20w * 100
             if dist < 0: status = "⚠️ 破線空手"
@@ -321,7 +324,10 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 elif kd_w and kd_w < 20: status = "🟢 週K超跌"
                 elif kd_m and kd_m < 20: status = "🟢 月K超跌"
                 else: status = "✓ 線上安全"
-            sec3.append(f"   距20週均: {dist:+.1f}% ({status})")
+                
+            # 計算 20週均線 數值格式
+            ma_fmt = f"{ma20w:,.0f}" if item["yf"] == "^TWII" else f"{ma20w:,.1f}"
+            sec3.append(f"   距20週均({ma_fmt}): {dist:+.1f}% ({status})")
 
     # === 收集第 4 區段文字 ===
     sec4 = ["▌四、其他位階警示"]
@@ -363,7 +369,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             "lineSpacing": "4px"
         }
 
-    # === 防止網址為空的終極防禦 (V4.4 修復) ===
+    # === 防止網址為空的終極防禦 ===
     report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.github.io/stock-monitor/"
 
     # === 組合出 Flex Message JSON 結構 ===
