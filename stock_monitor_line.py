@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.0 雲端全自動版 - 核心指標價格加括弧)
+美股／台股監控推播系統 (V5.2 雲端全自動版 - 加入 Yahoo 財經頭條新聞)
 ---------------------------------------------------------------------------
-更新日誌 (V5.0): 
-- 核心指標區塊：標題最新價格外層加上括弧，如「1. 台股大盤 (41,662)」。
-- 整合 V4.9 的美股代碼防呆與台 VIX 缺值防呆。
+更新日誌 (V5.2): 
+- 網頁報表新增「市場新聞 (Yahoo 財經)」區塊，自動抓取最新 5 則財經新聞。
+- 整合 V5.1 的雙重燈號與 V5.2 備註三欄並排縮減高度設計。
 """
 
 import os
@@ -14,6 +14,7 @@ import io
 import csv
 import json
 import datetime as dt
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # 強制關閉 curl_cffi 避免 DNS 逾時
@@ -70,12 +71,10 @@ def load_watchlist():
         yf_symbol = (raw.get("yf_symbol") or "").strip()
         market = (raw.get("market") or "").strip()
         
-        # 美股與台股代碼防呆處理
         if not yf_symbol:
             if market == "台股" or code.isdigit():
                 yf_symbol = f"{code}.TW"
             else:
-                # 美股若有小數點（如 BRK.B）自動轉為 Yahoo 格式（BRK-B）
                 yf_symbol = code.replace(".", "-")
         else:
             if market == "美股":
@@ -127,7 +126,7 @@ def kd_timeframes(df):
     except: out["月"] = (None, None)
     return out
 
-def get_weather(pct_val):
+def get_weather_line(pct_val):
     if pct_val is None: return ""
     if pct_val >= 2.0: return "☀️"
     elif pct_val > 0: return "🌤️"
@@ -138,6 +137,27 @@ def get_weather(pct_val):
 def fmt_pct(v):
     if v is None: return "—"
     return f"{'▲' if v>0 else '▼' if v<0 else ''}{abs(v):.1f}%"
+
+def fetch_yahoo_news(limit=5):
+    """抓取 Yahoo 奇摩財經 RSS 新聞"""
+    url = "https://tw.news.yahoo.com/rss/finance"
+    news = []
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        for item in root.findall('.//item')[:limit]:
+            title = item.find('title')
+            link = item.find('link')
+            if title is not None and link is not None:
+                news.append({"title": title.text, "link": link.text})
+    except Exception as e:
+        print(f"[錯誤] 抓取新聞失敗: {e}", file=sys.stderr)
+        
+    if not news:
+        news.append({"title": "暫時無法取得最新新聞，請稍後再試。", "link": "#"})
+    return news
 
 # ---------------------------------------------------------------------------
 # 匯出與報表生成
@@ -155,6 +175,7 @@ def export_all_data(closes, watch, kd_data):
         
         last = s.iloc[-1]
         pct_1d = pct(last, s.iloc[-2]) if len(s) >= 2 else None
+        net_1d = (last - s.iloc[-2]) if len(s) >= 2 else None
         pct_1w = pct(last, s.iloc[-6]) if len(s) >= 6 else None
         pct_1m = pct(last, s.iloc[-22]) if len(s) >= 22 else None
         pct_1y = pct(last, s.iloc[-253]) if len(s) >= 253 else None
@@ -169,6 +190,7 @@ def export_all_data(closes, watch, kd_data):
         row = {
             "序號": i, "群組": t["group"], "市場": t["market"], "代碼": t["code"],
             "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2), "資料日期": s.index[-1].strftime("%Y-%m-%d"),
+            "當日漲跌": round(net_1d, 2) if net_1d is not None else None,
             "當日%": round(pct_1d, 2) if pct_1d is not None else None,
             "週%": round(pct_1w, 2) if pct_1w is not None else None,
             "月%": round(pct_1m, 2) if pct_1m is not None else None,
@@ -183,77 +205,193 @@ def export_all_data(closes, watch, kd_data):
     df.to_csv(REPORT_CSV_PATH, index=False, encoding="utf-8-sig")
     return df
 
-def generate_html_report(df, vix_hist):
-    now_str = dt.datetime.now().strftime("%Y/%m/%d %H:%M")
+def generate_html_report(df, vix_hist, news_data):
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    now_str = dt.datetime.now(tw_tz).strftime("%Y/%m/%d %H:%M")
     
     idx_df = df[df['名稱'].isin([n for _, n in INDICES])]
     tw_idx = df[df['名稱'] == '台股大盤']
     us_stocks = df[(df['市場'] == '美股') & (~df['名稱'].isin([n for _, n in INDICES]))]
     tw_stocks = df[(df['市場'] == '台股') & (df['名稱'] != '台股大盤')]
     
-    def render_pct_td(val):
+    def fmt_net(val, is_idx=False):
+        if pd.isna(val): return '<td class="num mute">—</td>'
+        cls = 'up' if val > 0 else 'down' if val < 0 else 'mute'
+        mark = '+' if val > 0 else ''
+        decimals = 0 if is_idx else 2
+        return f'<td class="num {cls}">{mark}{val:,.{decimals}f}</td>'
+
+    def fmt_pct_td(val):
         if pd.isna(val): return '<td class="num mute">—</td>'
         cls = 'up' if val > 0 else 'down' if val < 0 else 'mute'
         mark = '▲' if val > 0 else '▼' if val < 0 else ''
         return f'<td class="num {cls}">{mark}{abs(val):.1f}%</td>'
-        
-    def render_row(row, idx):
-        url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
-        return f"<tr><td class='num idx'>{idx}</td><td class='name'><a href='{url}' target='_blank'>{row['名稱']}</a> <span class='code'>{row['代碼']}</span></td><td class='num'>{row['最新收盤']:,.2f}</td>{render_pct_td(row['當日%'])}{render_pct_td(row['週%'])}{render_pct_td(row['月%'])}{render_pct_td(row['年%'])}</tr>"
 
-    html = f"<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>股市監控報表</title><style>:root {{ --up:#d32f2f; --down:#1b8e3a; --line:#e3e6ea; --mute:#8a9099; --head:#1f3b66; }} * {{ box-sizing:border-box; }} body {{ margin:0; background:#f6f7f9; color:#222; font-family:'Microsoft JhengHei',system-ui,sans-serif; font-size:13px; }} .wrap {{ max-width:760px; margin:0 auto; padding:16px; }} h1 {{ font-size:18px; margin:4px 0; }} h2 {{ font-size:14px; margin:18px 0 6px; color:var(--head); border-left:4px solid var(--head); padding-left:8px; }} .sub {{ color:var(--mute); font-size:12px; margin-bottom:6px; }} table {{ width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }} th,td {{ padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }} thead th {{ background:#eef1f5; color:#333; font-weight:600; font-size:12px; }} thead th.num {{ text-align:center; }} thead th small {{ color:var(--mute); font-weight:400; font-size:10px; display:block; }} tbody tr:last-child td {{ border-bottom:none; }} td.num {{ text-align:center; font-variant-numeric:tabular-nums; }} td.idx {{ color:var(--mute); width:30px; text-align:center; }} .code {{ color:var(--mute); font-size:11px; }} .up {{ color:var(--up); }} .down {{ color:var(--down); }} .mute {{ color:var(--mute); }} tr.grp td {{ background:#f0f3f7; font-weight:700; color:var(--head); }} .foot {{ color:var(--mute); font-size:11px; margin-top:14px; line-height:1.6; }} a {{ color:#1456b8; text-decoration:none; }} a:hover {{ text-decoration:underline; }}</style></head><body><div class='wrap'><h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str}</div><h2>大盤與 VIX 狀況</h2><div style='overflow-x:auto;'><table><thead><tr><th>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>燈號</th></tr></thead><tbody>"
+    def get_weather_icon(pct_val, threshold):
+        if pd.isna(pct_val): return "—"
+        if pct_val >= threshold: return "☀️"
+        elif pct_val > 0: return "🌤️"
+        elif pct_val == 0: return "☁️"
+        elif pct_val <= -threshold: return "⛈️"
+        else: return "🌧️"
+
+    def get_position(last, ma20, ma60, ma240):
+        if pd.isna(last): return "—"
+        if pd.notna(ma20) and last >= ma20: return "月線上"
+        if pd.notna(ma60) and last >= ma60: return "月～季"
+        if pd.notna(ma240) and last >= ma240: return "季～年"
+        if pd.notna(ma240) and last < ma240: return "年線下"
+        return "—"
+
+    def get_status_badge(last, ma20w, kd_d, kd_w, kd_m):
+        if pd.isna(last) or pd.isna(ma20w) or ma20w == 0: return '<span class="mute">—</span>'
+        if last < ma20w:
+            return '<span class="badge b-warn">⚠️ 破線空手</span>'
+        kd_list = [v for v in [kd_d, kd_w, kd_m] if pd.notna(v)]
+        if any(k < 20 for k in kd_list):
+            return '<span class="badge b-down">🟢 日K超跌</span>'
+        if any(k > 80 for k in kd_list):
+            return '<span class="badge b-up">🔴 熱K>80</span>'
+        return '<span class="badge b-safe">✓ 線上安全</span>'
+        
+    def get_dist_pct(last, ma20w):
+        if pd.isna(last) or pd.isna(ma20w) or ma20w == 0: return "—"
+        dist = (last - ma20w) / ma20w * 100
+        mark = '+' if dist > 0 else ''
+        return f"{mark}{dist:.1f}%"
+
+    html = f"""<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>股市監控報表</title>
+<style>
+:root {{ --up:#d32f2f; --down:#1b8e3a; --line:#e3e6ea; --mute:#8a9099; --head:#1f3b66; }} 
+* {{ box-sizing:border-box; }} 
+body {{ margin:0; background:#f6f7f9; color:#222; font-family:'Microsoft JhengHei',system-ui,sans-serif; font-size:13px; padding-bottom:40px; }} 
+.wrap {{ max-width:960px; margin:0 auto; padding:16px; }} 
+h1 {{ font-size:18px; margin:4px 0; }} 
+h2 {{ font-size:14px; margin:24px 0 8px; color:var(--head); border-left:4px solid var(--head); padding-left:8px; }} 
+.sub {{ color:var(--mute); font-size:12px; margin-bottom:6px; }} 
+table {{ width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }} 
+th,td {{ padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }} 
+thead th {{ background:#eef1f5; color:#333; font-weight:600; font-size:12px; }} 
+thead th.num {{ text-align:center; }} 
+tbody tr:last-child td {{ border-bottom:none; }} 
+td.num {{ text-align:center; font-variant-numeric:tabular-nums; }} 
+td.idx {{ color:var(--mute); width:30px; text-align:center; }} 
+.up {{ color:var(--up); font-weight:bold; }} .down {{ color:var(--down); font-weight:bold; }} .mute {{ color:var(--mute); }} 
+tr.grp td {{ background:#f0f3f7; font-weight:700; color:var(--head); }} 
+a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-decoration:underline; }}
+.badge {{ padding: 3px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; display: inline-block; }}
+.b-up {{ background: #ffebee; color: #d32f2f; }}
+.b-down {{ background: #e8f5e9; color: #1b8e3a; }}
+.b-warn {{ background: #fff3e0; color: #ef6c00; }}
+.b-safe {{ background: #f0f3f7; color: #333; }}
+.foot {{ color:var(--mute); font-size:11px; margin-top:14px; text-align:center; }}
+</style></head><body><div class='wrap'>
+<h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
+
+<h2>大盤與 VIX 狀況 (+/- 2%)</h2>
+<div style='overflow-x:auto;'><table>
+<thead><tr><th>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th></tr></thead><tbody>
+"""
     
-    for _, row in idx_df.iterrows():
-        dchg = row['當日%']
-        html += f"<tr><td><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td><td class='num'>{row['最新收盤']:,.0f}</td>{render_pct_td(dchg)}<td class='num'>{get_weather(dchg)}</td></tr>"
+    for _, row in pd.concat([idx_df, tw_idx]).iterrows():
+        last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
+        ma20, ma60, ma240, ma20w = row['MA20'], row['MA60'], row['MA240'], row['MA20週']
+        kd_d, kd_w, kd_m = row['日K'], row['週K'], row['月K']
         
-    for _, row in tw_idx.iterrows():
-        dchg = row['當日%']
-        html += f"<tr><td><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td><td class='num'>{row['最新收盤']:,.0f}</td>{render_pct_td(dchg)}<td class='num'>{get_weather(dchg)}</td></tr>"
+        pos = get_position(last, ma20, ma60, ma240)
+        weather = get_weather_icon(pct_val, 2.0)
+        status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         
+        html += f"<tr><td><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
+        html += f"<td class='num'>{last:,.0f}</td>"
+        html += fmt_net(net, is_idx=True)
+        html += fmt_pct_td(pct_val)
+        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td></tr>"
+
     for v_name, v_sym in [("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")]:
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
-            html += f"<tr><td>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
+            html += f"<tr><td>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
         else:
-            status = "🟢安全" if val < 35 else "🔴恐慌"
-            html += f"<tr><td>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
+            status = "<span class='badge b-down'>🟢 安全</span>" if val < 35 else "<span class='badge b-up'>🔴 恐慌</span>"
+            html += f"<tr><td>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
+            
+    html += "</tbody></table></div>"
+    
+    html += "<h2>個股追蹤清單</h2><div style='overflow-x:auto;'><table><thead><tr>"
+    html += "<th class='num'>#</th><th>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th></tr></thead><tbody>"
+
+    def render_stock_row(row, idx):
+        last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
+        ma20, ma60, ma240, ma20w = row['MA20'], row['MA60'], row['MA240'], row['MA20週']
+        kd_d, kd_w, kd_m = row['日K'], row['週K'], row['月K']
         
-    html += "</tbody></table></div><h2>個股追蹤清單</h2><div style='overflow-x:auto;'><table><thead><tr><th class='num'>#</th><th>名稱</th><th class='num'>收盤</th><th class='num'>當日</th><th class='num'>週<small>(約5日)</small></th><th class='num'>月<small>(約21日)</small></th><th class='num'>年<small>(約252日)</small></th></tr></thead><tbody><tr class='grp'><td colspan='7'>美股觀察區</td></tr>"
-      
+        pos = get_position(last, ma20, ma60, ma240)
+        weather = get_weather_icon(pct_val, 5.0) 
+        status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
+        dist_str = get_dist_pct(last, ma20w)
+        
+        kd_str = f"{int(kd_d) if pd.notna(kd_d) else '-'}/{int(kd_w) if pd.notna(kd_w) else '-'}/{int(kd_m) if pd.notna(kd_m) else '-'}"
+        ma20w_str = f"{ma20w:,.2f}" if pd.notna(ma20w) else "—"
+        url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
+        
+        res = f"<tr><td class='num idx'>{idx}</td><td class='name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
+        res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
+        res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td></tr>"
+        return res
+
+    html += "<tr class='grp'><td colspan='11'>美股觀察區</td></tr>"
     idx = 1
     for _, row in us_stocks.iterrows():
-        html += render_row(row, idx)
+        html += render_stock_row(row, idx)
         idx += 1
         
-    html += "<tr class='grp'><td colspan='7'>台股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='11'>台股觀察區</td></tr>"
     for _, row in tw_stocks.iterrows():
-        html += render_row(row, idx)
+        html += render_stock_row(row, idx)
         idx += 1
         
-    html += "</tbody></table></div><h2>超跌警示</h2><ul style='list-style:none; padding:0; margin:0;'>"
-  
-    over_sold = False
-    for _, row in df.iterrows():
-        if row['名稱'] in [n for _, n in INDICES] or row['名稱'] == '台股大盤': continue
-        ma20w = row['MA20週']
-        last = row['最新收盤']
-        pct_1m = row['月%']
-        alerts = []
-        if pd.notna(ma20w) and last < ma20w:
-            alerts.append(f"跌破 20 週均線 ({(last-ma20w)/ma20w*100:.1f}%)")
-        if pd.notna(pct_1m) and pct_1m <= -20:
-            alerts.append(f"月跌幅達 {pct_1m:.1f}%")
-            
-        if alerts:
-            over_sold = True
-            html += f"<li style='background:#fff; border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin-bottom:4px;'>⚡ <b>{row['名稱']}</b> <span class='code'>{row['代碼']}</span>：{', '.join(alerts)}</li>"
-            
-    if not over_sold:
-        html += "<li style='background:#fff; border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin-bottom:4px;'>✅ 今日無標的觸發超跌警示。</li>"
+    html += "</tbody></table></div>"
 
-    html += "</ul><div class='foot'>資料來源：<a href='https://finance.yahoo.com/' target='_blank'>Yahoo Finance</a><br>報表產生器：V5.0 全自動雲端版<br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
+    # ================= 新增：市場新聞區塊 =================
+    html += "<h2>市場新聞 ( Yahoo 財經 )</h2>"
+    html += "<ol style='line-height:1.8; font-size:14px; padding-left:24px; margin-bottom:24px;'>"
+    for item in news_data:
+        html += f"<li><a href='{item['link']}' target='_blank' style='font-weight:normal;'>{item['title']}</a></li>"
+    html += "</ol>"
+
+    # ================= 沉底備註區塊 (並排縮減高度) =================
+    html += """
+    <div class="notes" style="margin-top: 24px; font-size: 12px; color: #666; background: #fcfcfc; padding: 16px; border-radius: 6px; border: 1px solid var(--line);">
+        <b style="font-size: 13px; color: #333;">📝 燈號與位階判斷標準</b>
+        <div style="display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; line-height: 1.7;">
+            <div style="flex: 1 1 300px;">
+                <b style="color:#1f3b66;">1. 當日燈號 (大盤 ±2% / 個股 ±5%)</b><br>
+                ☀️ <b>大晴天</b>：大盤漲 >= 2.0% / 個股漲 >= 5.0%<br>
+                🌤️ <b>晴天</b>：漲幅 > 0% &nbsp;&nbsp;&nbsp; ☁️ <b>平盤</b>：漲幅 = 0%<br>
+                🌧️ <b>雨天</b>：跌幅 < 0% &nbsp;&nbsp;&nbsp; ⛈️ <b>雷雨</b>：大盤 <= -2% / 個股 <= -5%
+            </div>
+            <div style="flex: 1 1 300px;">
+                <b style="color:#1f3b66;">2. 位階燈號 (大盤與個股通用)</b><br>
+                ⚠️ <b>破線空手</b>：跌破 20 週均線（長線趨勢轉弱）<br>
+                🟢 <b>K值超跌</b>：20 週線上，且任一 K值 < 20<br>
+                🔴 <b>熱K>80</b>：20 週線上，且任一 K值 > 80<br>
+                ✓ <b>線上安全</b>：20 週線上，且 KD 數值無極端狀況
+            </div>
+            <div style="flex: 1 1 180px;">
+                <b style="color:#1f3b66;">3. 股價位階</b><br>
+                依據收盤價落點分為：<br>
+                <span style="display:inline-block; background:#eef1f5; padding:2px 6px; border-radius:4px; margin-top:4px;">月線上</span>
+                <span style="display:inline-block; background:#eef1f5; padding:2px 6px; border-radius:4px; margin-top:4px;">月~季</span><br>
+                <span style="display:inline-block; background:#eef1f5; padding:2px 6px; border-radius:4px; margin-top:4px;">季~年</span>
+                <span style="display:inline-block; background:#eef1f5; padding:2px 6px; border-radius:4px; margin-top:4px;">年線下</span>
+            </div>
+        </div>
+    </div>
+    """
+
+    html += "<div class='foot'>資料來源：Yahoo Finance ｜ 報表產生器：V5.2 HTML 全能版<br><br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
     
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
@@ -265,7 +403,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     today = dt.datetime.now()
     wd = "一二三四五六日"[today.weekday()]
     
-    # === 收集第 1 區段文字 ===
     sec1 = ["▌一、大盤與核心狀況 (+/- 2%)"]
     for i, (sym, name) in enumerate(INDICES, 1):
         s = closes.get(sym)
@@ -273,7 +410,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             last, prev = s.iloc[-1], s.iloc[-2]
             diff = last - prev
             dchg = pct(last, prev)
-            sec1.append(f"{i}. {name} {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
+            sec1.append(f"{i}. {name} {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather_line(dchg)}")
             
     sec1.append("-" * 15)
     core_items = []
@@ -285,7 +422,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         last, prev = s_twii.iloc[-1], s_twii.iloc[-2]
         diff = last - prev
         dchg = pct(last, prev)
-        sec1.append(f"{item_idx}. 台股大盤 {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
+        sec1.append(f"{item_idx}. 台股大盤 {last:,.0f} ({diff:+,.0f} ; {fmt_pct(dchg)}) {get_weather_line(dchg)}")
         core_items.append({"name": "台股大盤", "yf": "^TWII", "last": last, "ma20w": weekly_ma(s_twii, 20)})
         item_idx += 1
     
@@ -300,18 +437,14 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 diff = last - prev
                 dchg = pct(last, prev)
                 display_name = w["name"] if "0050" not in sym or "元大" in w["name"] else "元大台灣50"
-                sec1.append(f"{item_idx}. {display_name} {last:,.1f} ({diff:+,.1f} ; {fmt_pct(dchg)}) {get_weather(dchg)}")
+                sec1.append(f"{item_idx}. {display_name} {last:,.1f} ({diff:+,.1f} ; {fmt_pct(dchg)}) {get_weather_line(dchg)}")
                 core_items.append({"name": display_name, "yf": sym, "last": last, "ma20w": weekly_ma(s, 20)})
                 item_idx += 1
 
-    # === 收集第 2 區段文字 ===
     sec2 = ["▌二、VIX 恐慌指數 (<35)"]
     for i, (v_name, v_sym) in enumerate([("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")], 1):
         h = vix_hist.get(v_sym, [0, 0, 0, 0])
-        val_today = h[0]
-        val_yest = h[1]
-        val_prev_w = h[3]
-        
+        val_today, val_yest, val_prev_w = h[0], h[1], h[3]
         if val_today is None or val_today <= 0:
             sec2.append(f"{i}. {v_name} — (暫無報價)")
         else:
@@ -320,7 +453,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             prev_w_str = f"前一週{val_prev_w:.1f}" if (val_prev_w and val_prev_w > 0) else "前一週—"
             sec2.append(f"{i}. {v_name} {val_today:.1f}({status}), {yest_str}, {prev_w_str}")
 
-    # === 收集第 3 區段文字 (V5.0: 標題價格加上括弧) ===
     sec3 = ["▌三、台股核心指標 (K<20)"]
     for i, item in enumerate(core_items, 1):
         kd = kd_data.get(item["yf"], {})
@@ -331,7 +463,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         last = item["last"]
         ma20w = item["ma20w"]
         
-        # 標題加上括弧格式：例如 (41,662) 或 (2,235.0)
         price_fmt = f"({last:,.0f})" if item["yf"] == "^TWII" else f"({last:,.1f})"
         sec3.append(f"{i}. {item['name']} {price_fmt}")
         sec3.append(f"   K值: 日{int(kd_d) if kd_d else '-'} / 週{int(kd_w) if kd_w else '-'} / 月{int(kd_m) if kd_m else '-'}")
@@ -343,12 +474,10 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 if kd_d and kd_d < 20: status = "🟢 日K超跌"
                 elif kd_w and kd_w < 20: status = "🟢 週K超跌"
                 elif kd_m and kd_m < 20: status = "🟢 月K超跌"
-                else: status = "✓ 線上安全"
-                
+                else: status = "✓ 線安全"
             ma_fmt = f"{ma20w:,.0f}" if item["yf"] == "^TWII" else f"{ma20w:,.1f}"
             sec3.append(f"   距20週均({ma_fmt}): {dist:+.1f}% ({status})")
 
-    # === 收集第 4 區段文字 ===
     sec4 = ["▌四、其他位階警示"]
     alerts = []
     all_targets = [{"name": n, "yf": s} for s, n in INDICES] + [{"name": w["name"], "yf": w["yf_symbol"]} for w in watch]
@@ -378,14 +507,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     else: sec4.append("*(今日無觸發)*")
 
     def create_box(lines, color="#333333"):
-        return {
-            "type": "text",
-            "text": "\n".join(lines),
-            "size": "sm",
-            "wrap": True,
-            "color": color,
-            "lineSpacing": "4px"
-        }
+        return { "type": "text", "text": "\n".join(lines), "size": "sm", "wrap": True, "color": color, "lineSpacing": "4px" }
 
     report_url = os.environ.get("GITHUB_PAGES_URL", "").strip() or "https://ckliu60.github.io/stock-monitor/"
 
@@ -394,99 +516,3 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         "altText": f"📊 股市快報 {today.month:02d}/{today.day:02d} 已送達",
         "contents": {
             "type": "bubble",
-            "size": "mega",
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "spacing": "md",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"📊 股市核心快報 {today.month:02d}/{today.day:02d} ({wd})",
-                        "weight": "bold",
-                        "size": "md",
-                        "color": "#1f3b66"
-                    },
-                    {"type": "separator", "margin": "md"},
-                    create_box(sec1),
-                    {"type": "separator", "margin": "md"},
-                    create_box(sec2),
-                    {"type": "separator", "margin": "md"},
-                    create_box(sec3),
-                    {"type": "separator", "margin": "md"},
-                    create_box(sec4),
-                    {"type": "separator", "margin": "md"},
-                    {
-                        "type": "button",
-                        "style": "primary",
-                        "color": "#1456b8",
-                        "height": "sm",
-                        "action": {
-                            "type": "uri",
-                            "label": "👉 開啟詳細網頁報表",
-                            "uri": report_url
-                        }
-                    }
-                ]
-            }
-        }
-    }
-    return flex_payload
-
-def main():
-    force_dry_run = "--dry-run" in sys.argv
-    watch = load_watchlist()
-    
-    idx_syms = [s for s, _ in INDICES]
-    stk_syms = [w["yf_symbol"] for w in watch]
-    all_syms = list(set(idx_syms + stk_syms + ["^TWII"]))
-    closes = fetch_data(all_syms)
-
-    v_data = fetch_data(["^VIX", "^VIXTWN"], period="1mo")
-    vix_hist = {}
-    for v_sym in ["^VIX", "^VIXTWN"]:
-        s = v_data.get(v_sym)
-        if s is not None and len(s) >= 6:
-            vix_hist[v_sym] = [s.iloc[-1], s.iloc[-2], s.iloc[-3], s.iloc[-6]]
-        elif s is not None and len(s) > 0:
-            vix_hist[v_sym] = [s.iloc[-1], 0, 0, 0]
-        else:
-            vix_hist[v_sym] = [0, 0, 0, 0]
-
-    kd_data = {}
-    try:
-        raw_kd = yf.download(all_syms, period="2y", interval="1d", auto_adjust=False, progress=False, group_by="ticker")
-        for sym in all_syms:
-            df = raw_kd if len(all_syms) == 1 else raw_kd[sym]
-            if "Close" in df:
-                df = df[["High", "Low", "Close"]].dropna()
-                kd_data[sym] = kd_timeframes(df)
-    except: pass
-
-    # 生成網頁與 CSV 檔案
-    df_report = export_all_data(closes, watch, kd_data)
-    generate_html_report(df_report, vix_hist)
-
-    # 建立卡片格式訊息
-    flex_message = build_flex_message(closes, watch, kd_data, vix_hist)
-
-    token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
-    uid = os.environ.get("LINE_USER_ID", "").strip()
-    
-    if force_dry_run or not token or not uid:
-        print("[DRY-RUN] 訊息預覽 JSON：\n" + json.dumps(flex_message, indent=2, ensure_ascii=False) + "\n")
-        return 0
-
-    resp = requests.post(LINE_PUSH_URL, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                         json={"to": uid, "messages": [flex_message]}, timeout=20)
-    
-    try:
-        resp.raise_for_status()
-        print("[OK] 已成功推播卡片訊息至 LINE。")
-    except Exception as e:
-        print(f"[錯誤] LINE 推播失敗: {e}\n{resp.text}", file=sys.stderr)
-        
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
