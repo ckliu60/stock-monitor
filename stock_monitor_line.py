@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.2 雲端全自動版 - 完整修正版)
+美股／台股監控推播系統 (V5.3 雲端全自動版 - 雙 CSV 按鈕雙效升級版)
 ---------------------------------------------------------------------------
-更新日誌:
-- 包含最新 5 則財經新聞模組。
-- 包含並排縮減高度的備註區塊。
+更新日誌 (V5.3): 
+- 網頁底部新增獨立的「👀 線上直接檢視 CSV」與「📥 下載完整 CSV」雙按鈕。
+- 整合 Yahoo 財經 5 則頭條新聞、三欄並排備註、台灣時間校正與雙重燈號。
 """
 
 import os
@@ -375,9 +375,9 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
             <div style="flex: 1 1 300px;">
                 <b style="color:#1f3b66;">2. 位階燈號 (大盤與個股通用)</b><br>
                 ⚠️ <b>破線空手</b>：跌破 20 週均線（長線趨勢轉弱）<br>
-                🟢 <b>K值超跌</b>：20 週線上，且任一 K值 < 20<br>
-                🔴 <b>熱K>80</b>：20 週線上，且任一 K值 > 80<br>
-                ✓ <b>線上安全</b>：20 週線上，且 KD 數值無極端狀況
+                🟢 <b>K值超跌</b>：20 週線上, 且任一 K值 < 20<br>
+                🔴 <b>熱K>80</b>：20 週線上, 且任一 K值 > 80<br>
+                ✓ <b>線上安全</b>：20 週線上, 且 KD 數值無極端狀況
             </div>
             <div style="flex: 1 1 180px;">
                 <b style="color:#1f3b66;">3. 股價位階</b><br>
@@ -391,7 +391,17 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     </div>
     """
 
-    html += "<div class='foot'>資料來源：Yahoo Finance ｜ 報表產生器：V5.2 HTML 全能版<br><br><a href='report_data.csv' target='_blank'>📥 下載完整 CSV 原始數據</a></div></div></body></html>"
+    # ================= 雙 CSV 按鈕區塊 =================
+    html += """
+    <div class='foot' style='margin-top:20px; font-size:12px;'>
+        資料來源：Yahoo Finance ｜ 報表產生器：V5.2 雙按鈕完整版<br><br>
+        <div style="display:inline-flex; gap:12px; justify-content:center; align-items:center;">
+            <a href='report_data.csv' target='_blank' style='background:#1f3b66; color:#fff; padding:6px 14px; border-radius:4px; text-decoration:none; font-weight:normal;'>👀 線上直接檢視 CSV</a>
+            <a href='report_data.csv' download='report_data.csv' style='background:#1456b8; color:#fff; padding:6px 14px; border-radius:4px; text-decoration:none; font-weight:normal;'>📥 下載完整 CSV 原始數據</a>
+        </div>
+    </div>
+    </div></body></html>
+    """
     
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
@@ -571,7 +581,7 @@ def main():
     # 抓取 5 則最新市場新聞
     news_data = fetch_yahoo_news(limit=5)
 
-    # 生成網頁與 CSV 檔案 (新增傳入 news_data)
+    # 生成網頁與 CSV 檔案
     df_report = export_all_data(closes, watch, kd_data)
     generate_html_report(df_report, vix_hist, news_data)
 
