@@ -4,7 +4,7 @@
 美股／台股監控推播系統 (V5.3 雲端全自動版 - 雙 CSV 按鈕雙效升級版)
 ---------------------------------------------------------------------------
 更新日誌 (V5.3): 
-- 網頁底部新增獨立的「👀 線上直接檢視 CSV」與「📥 下載完整 CSV」雙按鈕。
+- 網頁底部新增獨立的「👀 線上直接檢視 CSV」與「📥 下載完整 CSV」雙按鈕 (優化手機版相容性)。
 - 整合 Yahoo 財經 5 則頭條新聞、三欄並排備註、台灣時間校正與雙重燈號。
 """
 
@@ -285,6 +285,11 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .b-warn {{ background: #fff3e0; color: #ef6c00; }}
 .b-safe {{ background: #f0f3f7; color: #333; }}
 .foot {{ color:var(--mute); font-size:11px; margin-top:14px; text-align:center; }}
+/* 新增按鈕樣式 */
+.action-btn {{ display:inline-block; padding:8px 16px; border-radius:4px; text-decoration:none; font-size:13px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; }}
+.action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
+.btn-view {{ background:#1f3b66; color:#fff; }}
+.btn-download {{ background:#1456b8; color:#fff; }}
 </style></head><body><div class='wrap'>
 <h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
 
@@ -395,9 +400,9 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
         資料來源：Yahoo Finance ｜ 報表產生器：V5.2 雙按鈕完整版<br><br>
-        <div style="display:inline-flex; gap:12px; justify-content:center; align-items:center;">
-            <a href='report_data.csv' target='_blank' style='background:#1f3b66; color:#fff; padding:6px 14px; border-radius:4px; text-decoration:none; font-weight:normal;'>👀 線上直接檢視 CSV</a>
-            <a href='report_data.csv' download='report_data.csv' style='background:#1456b8; color:#fff; padding:6px 14px; border-radius:4px; text-decoration:none; font-weight:normal;'>📥 下載完整 CSV 原始數據</a>
+        <div style="display:flex; gap:12px; justify-content:center; align-items:center; flex-wrap:wrap;">
+            <a href='report_data.csv' target='_blank' class='action-btn btn-view'>👀 線上直接檢視 CSV</a>
+            <a href='report_data.csv' download='report_data.csv' class='action-btn btn-download'>📥 下載完整 CSV 原始數據</a>
         </div>
     </div>
     </div></body></html>
