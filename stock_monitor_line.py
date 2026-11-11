@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.3 雲端全自動版 - 雙 CSV 按鈕雙效升級版)
+美股／台股監控推播系統 (V5.4 雲端全自動版 - 網頁檢視升級版)
 ---------------------------------------------------------------------------
-更新日誌 (V5.3): 
-- 網頁底部新增獨立的「👀 線上直接檢視 CSV」與「📥 下載完整 CSV」雙按鈕 (優化手機版相容性)。
-- 整合 Yahoo 財經 5 則頭條新聞、三欄並排備註、台灣時間校正與雙重燈號。
+更新日誌 (V5.4): 
+- 修正手機與桌機瀏覽器點擊「檢視 CSV」會變成下載的問題，改為自動生成專屬 csv_view.html 檢視頁面。
 """
 
 import os
@@ -50,6 +49,7 @@ HERE = Path(__file__).resolve().parent
 PUBLIC_DIR = HERE / "public"
 REPORT_HTML_PATH = PUBLIC_DIR / "index.html"
 REPORT_CSV_PATH = PUBLIC_DIR / "report_data.csv"
+CSV_VIEW_HTML_PATH = PUBLIC_DIR / "csv_view.html"
 
 # ---------------------------------------------------------------------------
 # 工具函式
@@ -399,9 +399,10 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     # ================= 雙 CSV 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V5.2 雙按鈕完整版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V5.4 網頁檢視升級版<br><br>
         <div style="display:flex; gap:12px; justify-content:center; align-items:center; flex-wrap:wrap;">
-            <a href='report_data.csv' target='_blank' class='action-btn btn-view'>👀 線上直接檢視 CSV</a>
+            <!-- 修改點：連到我們自己生成的檢視網頁 csv_view.html -->
+            <a href='csv_view.html' target='_blank' class='action-btn btn-view'>👀 線上直接檢視 CSV</a>
             <a href='report_data.csv' download='report_data.csv' class='action-btn btn-download'>📥 下載完整 CSV 原始數據</a>
         </div>
     </div>
@@ -410,6 +411,37 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
+
+    # ================= 新增：動態產生 CSV 檢視專用網頁 =================
+    try:
+        with open(REPORT_CSV_PATH, "r", encoding="utf-8-sig") as f:
+            csv_content = f.read()
+            
+        csv_view_html = f"""<!doctype html>
+<html lang='zh-Hant'>
+<head>
+    <meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <title>CSV 原始數據檢視</title>
+    <style>
+        body {{ background:#1e1e1e; color:#d4d4d4; font-family: Consolas, "Courier New", monospace; padding: 20px; font-size: 13px; line-height: 1.6; margin: 0; }}
+        h2 {{ color: #4fc1ff; margin-top: 0; font-family: 'Microsoft JhengHei', sans-serif; border-bottom: 1px solid #444; padding-bottom: 10px; }}
+        pre {{ white-space: pre-wrap; word-wrap: break-word; background: #252526; padding: 15px; border-radius: 6px; border: 1px solid #333; overflow-x: auto; }}
+        .back-btn {{ display: inline-block; margin-bottom: 15px; color: #fff; background: #007acc; text-decoration: none; padding: 8px 16px; border-radius: 4px; font-family: sans-serif; font-size: 13px; }}
+        .back-btn:hover {{ background: #005999; }}
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-btn">⬅ 返回主報表</a>
+    <h2>📄 CSV 原始數據檢視</h2>
+    <pre>{csv_content}</pre>
+</body>
+</html>
+        """
+        with open(CSV_VIEW_HTML_PATH, "w", encoding="utf-8") as f:
+            f.write(csv_view_html)
+    except Exception as e:
+        print(f"[錯誤] 無法產生 CSV 檢視網頁: {e}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # 組裝 LINE Flex Message 卡片
