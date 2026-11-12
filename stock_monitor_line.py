@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.5 雲端全自動版 - 完整修復台股過濾與檢視升級版)
+美股／台股監控推播系統 (V5.7 雲端全自動版 - 手機版凍結窗格升級)
 ---------------------------------------------------------------------------
-更新日誌 (V5.5): 
-- 修復台股個股（00919、台積電等）因歷史資料門檻 (len < 252) 被整筆過濾刪除的問題，改為寬鬆驗證 (len >= 2)。
-- 均線與週/月技術指標加入足夠長度保護，若歷史資料不足則顯示 None / —，不阻擋整檔股票輸出。
-- 保留專屬 csv_view.html 生成，徹底解決手機與電腦端點擊直接檢視 CSV 的問題。
+更新日誌 (V5.7): 
+- 新增 HTML 表格「凍結窗格 (Sticky Column)」功能。在手機或小螢幕左右滑動檢視時，
+  「#」序號與「名稱」欄位會固定在畫面左側，並加上立體陰影，方便對照後方各項指標。
+- 延續 V5.6 產出 Excel 與 V5.5 寬鬆台股過濾的完整功能。
 """
 
 import os
@@ -50,8 +50,7 @@ SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRa7RG_nKx8DTBS
 HERE = Path(__file__).resolve().parent
 PUBLIC_DIR = HERE / "public"
 REPORT_HTML_PATH = PUBLIC_DIR / "index.html"
-REPORT_CSV_PATH = PUBLIC_DIR / "report_data.csv"
-CSV_VIEW_HTML_PATH = PUBLIC_DIR / "csv_view.html"
+REPORT_EXCEL_PATH = PUBLIC_DIR / "report_data.xlsx"
 
 # ---------------------------------------------------------------------------
 # 工具函式
@@ -141,7 +140,6 @@ def fmt_pct(v):
     return f"{'▲' if v>0 else '▼' if v<0 else ''}{abs(v):.1f}%"
 
 def fetch_yahoo_news(limit=5):
-    """抓取 Yahoo 奇摩財經 RSS 新聞"""
     url = "https://tw.news.yahoo.com/rss/finance"
     news = []
     try:
@@ -173,7 +171,6 @@ def export_all_data(closes, watch, kd_data):
     for i, t in enumerate(all_targets, 1):
         sym = t["yf"]
         s = closes.get(sym)
-        # 修正重點：改為只要有最新與前一日收盤價 (len >= 2) 即可輸出
         if s is None or len(s) < 2: continue
         
         last = s.iloc[-1]
@@ -205,7 +202,29 @@ def export_all_data(closes, watch, kd_data):
         
     PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
-    df.to_csv(REPORT_CSV_PATH, index=False, encoding="utf-8-sig")
+    
+    try:
+        with pd.ExcelWriter(REPORT_EXCEL_PATH, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='股市監控報表', index=False)
+            workbook  = writer.book
+            worksheet = writer.sheets['股市監控報表']
+            
+            header_format = workbook.add_format({
+                'bold': True, 'text_wrap': True, 'valign': 'center', 'align': 'center',
+                'fg_color': '#D7E4BC', 'border': 1
+            })
+            
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            
+            worksheet.set_column('E:E', 15)  
+            worksheet.set_column('F:F', 12)  
+            worksheet.set_column('G:Y', 10)  
+            worksheet.freeze_panes(1, 5)
+            
+    except Exception as e:
+        print(f"[錯誤] 無法產生 Excel 報表: {e}", file=sys.stderr)
+        
     return df
 
 def generate_html_report(df, vix_hist, news_data):
@@ -290,14 +309,40 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .foot {{ color:var(--mute); font-size:11px; margin-top:14px; text-align:center; }}
 .action-btn {{ display:inline-block; padding:8px 16px; border-radius:4px; text-decoration:none; font-size:13px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; }}
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
-.btn-view {{ background:#1f3b66; color:#fff; }}
-.btn-download {{ background:#1456b8; color:#fff; }}
+.btn-download {{ background:#1b8e3a; color:#fff; }}
+
+/* === 新增凍結窗格 (Sticky Column) 樣式 === */
+.sticky-col-idx {{
+    position: sticky;
+    left: 0;
+    background: #fff;
+    z-index: 2;
+}}
+.sticky-col-name {{
+    position: sticky;
+    left: 35px; /* 這裡要根據 .sticky-col-idx 的寬度微調 */
+    background: #fff;
+    z-index: 2;
+    box-shadow: 2px 0 4px -2px rgba(0,0,0,0.15); /* 加點右側立體陰影 */
+}}
+/* 讓群組標題那行不受影響 */
+tr.grp td.sticky-col-idx, tr.grp td.sticky-col-name {{
+    position: static;
+    box-shadow: none;
+}}
+/* 表頭凍結背景色維持原本的淺灰 */
+thead th.sticky-col-idx, thead th.sticky-col-name {{
+    background: #eef1f5;
+    z-index: 3; /* 表頭要在更上層 */
+}}
 </style></head><body><div class='wrap'>
 <h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
 
 <h2>大盤與 VIX 狀況 (+/- 2%)</h2>
 <div style='overflow-x:auto;'><table>
-<thead><tr><th>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th></tr></thead><tbody>
+<thead><tr>
+    <th class='sticky-col-name'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th>
+</tr></thead><tbody>
 """
     
     for _, row in pd.concat([idx_df, tw_idx]).iterrows():
@@ -309,7 +354,7 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
         weather = get_weather_icon(pct_val, 2.0)
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         
-        html += f"<tr><td><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
+        html += f"<tr><td class='sticky-col-name'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
         html += f"<td class='num'>{last:,.0f}</td>"
         html += fmt_net(net, is_idx=True)
         html += fmt_pct_td(pct_val)
@@ -319,15 +364,15 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
-            html += f"<tr><td>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
+            html += f"<tr><td class='sticky-col-name'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
         else:
             status = "<span class='badge b-down'>🟢 安全</span>" if val < 35 else "<span class='badge b-up'>🔴 恐慌</span>"
-            html += f"<tr><td>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
+            html += f"<tr><td class='sticky-col-name'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
             
     html += "</tbody></table></div>"
     
     html += "<h2>個股追蹤清單</h2><div style='overflow-x:auto;'><table><thead><tr>"
-    html += "<th class='num'>#</th><th>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th></tr></thead><tbody>"
+    html += "<th class='num sticky-col-idx'>#</th><th class='sticky-col-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th></tr></thead><tbody>"
 
     def render_stock_row(row, idx):
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
@@ -343,7 +388,7 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
         ma20w_str = f"{ma20w:,.2f}" if pd.notna(ma20w) else "—"
         url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
         
-        res = f"<tr><td class='num idx'>{idx}</td><td class='name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
+        res = f"<tr><td class='num idx sticky-col-idx'>{idx}</td><td class='name sticky-col-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
         res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
         res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td></tr>"
         return res
@@ -398,13 +443,12 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     </div>
     """
 
-    # ================= 雙 CSV 按鈕區塊 =================
+    # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V5.5 完整修正版<br><br>
-        <div style="display:flex; gap:12px; justify-content:center; align-items:center; flex-wrap:wrap;">
-            <a href='csv_view.html' target='_blank' class='action-btn btn-view'>👀 線上直接檢視 CSV</a>
-            <a href='report_data.csv' download='report_data.csv' class='action-btn btn-download'>📥 下載完整 CSV 原始數據</a>
+        資料來源：Yahoo Finance ｜ 報表產生器：V5.7 凍結窗格升級版<br><br>
+        <div style="display:flex; justify-content:center; align-items:center;">
+            <a href='report_data.xlsx' download='report_data.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 數據表</a>
         </div>
     </div>
     </div></body></html>
@@ -413,36 +457,6 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # ================= 動態產生 CSV 檢視專用網頁 =================
-    try:
-        with open(REPORT_CSV_PATH, "r", encoding="utf-8-sig") as f:
-            csv_content = f.read()
-            
-        csv_view_html = f"""<!doctype html>
-<html lang='zh-Hant'>
-<head>
-    <meta charset='utf-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>CSV 原始數據檢視</title>
-    <style>
-        body {{ background:#1e1e1e; color:#d4d4d4; font-family: Consolas, "Courier New", monospace; padding: 20px; font-size: 13px; line-height: 1.6; margin: 0; }}
-        h2 {{ color: #4fc1ff; margin-top: 0; font-family: 'Microsoft JhengHei', sans-serif; border-bottom: 1px solid #444; padding-bottom: 10px; }}
-        pre {{ white-space: pre-wrap; word-wrap: break-word; background: #252526; padding: 15px; border-radius: 6px; border: 1px solid #333; overflow-x: auto; }}
-        .back-btn {{ display: inline-block; margin-bottom: 15px; color: #fff; background: #007acc; text-decoration: none; padding: 8px 16px; border-radius: 4px; font-family: sans-serif; font-size: 13px; }}
-        .back-btn:hover {{ background: #005999; }}
-    </style>
-</head>
-<body>
-    <a href="index.html" class="back-btn">⬅ 返回主報表</a>
-    <h2>📄 CSV 原始數據檢視</h2>
-    <pre>{csv_content}</pre>
-</body>
-</html>
-        """
-        with open(CSV_VIEW_HTML_PATH, "w", encoding="utf-8") as f:
-            f.write(csv_view_html)
-    except Exception as e:
-        print(f"[錯誤] 無法產生 CSV 檢視網頁: {e}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # 組裝 LINE Flex Message 卡片
@@ -619,7 +633,7 @@ def main():
     # 抓取 5 則最新市場新聞
     news_data = fetch_yahoo_news(limit=5)
 
-    # 生成網頁與 CSV 檔案
+    # 生成網頁與 Excel 檔案
     df_report = export_all_data(closes, watch, kd_data)
     generate_html_report(df_report, vix_hist, news_data)
 
