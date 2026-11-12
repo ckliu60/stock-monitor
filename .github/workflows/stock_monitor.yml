@@ -1,10 +1,6 @@
 name: Stock Monitor Daily Report
 
 on:
-  schedule:
-    # GitHub 使用 UTC 時間 (比台灣慢 8 小時)
-    # UTC 22:30 週一至週五 (1-5) = 台灣時間週二至週六早上 06:30
-    - cron: '30 22 * * 1-5'
   workflow_dispatch:
   repository_dispatch:
     types: [run-stock-monitor]
