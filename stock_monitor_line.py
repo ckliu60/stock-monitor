@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.9 雲端全自動版 - Excel 篩選與台股高亮升級)
+美股／台股監控推播系統 (V6.2 雲端全自動版 - 名稱縮寫微調版)
 ---------------------------------------------------------------------------
-更新日誌 (V5.9): 
-- 修復手機瀏覽器下載 Excel 顯示不支援的問題（移除 download 屬性，改用 target="_blank" 喚起系統下載）。
-- Excel 產出時自動加入「第一列下拉式篩選 (AutoFilter)」。
-- 網頁與 Excel 皆新增「台股高亮功能」，只要是台股大盤或個股，整列套用淺黃色底色以利區別。
+更新日誌 (V6.2): 
+- 取消「富邦科技」的縮寫，保留原名以利辨識。
+- 將「台積電ADR」縮寫改為「台積電R」。
+- 保留 V6.1 的手機版凍結窗格欄寬最佳化與台股高亮功能。
 """
 
 import os
@@ -56,6 +56,14 @@ REPORT_EXCEL_PATH = PUBLIC_DIR / "report_data.xlsx"
 # 工具函式
 # ---------------------------------------------------------------------------
 
+def shorten_name(name):
+    """將過長的股票名稱縮短，以節省手機顯示空間"""
+    n = name.strip()
+    if "群益台灣精選高息" in n: return "00919"
+    if "元大台灣50" in n: return "0050"
+    if n == "台積電ADR": return "台積電R"
+    return n
+
 def load_watchlist():
     try:
         resp = requests.get(SHEET_CSV_URL, timeout=20)
@@ -81,9 +89,10 @@ def load_watchlist():
             if market == "美股":
                 yf_symbol = yf_symbol.replace(".", "-")
 
+        original_name = (raw.get("name") or yf_symbol).strip()
         rows.append({
             "market": market, "code": code, "yf_symbol": yf_symbol,
-            "name": (raw.get("name") or yf_symbol).strip(),
+            "name": shorten_name(original_name), # 載入時直接縮短名稱
             "group": (raw.get("group") or "觀察").strip()
         })
     return rows
@@ -209,7 +218,6 @@ def export_all_data(closes, watch, kd_data):
             workbook  = writer.book
             worksheet = writer.sheets['股市監控報表']
             
-            # 設定表頭格式
             header_format = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'center', 'align': 'center',
                 'fg_color': '#D7E4BC', 'border': 1
@@ -218,22 +226,18 @@ def export_all_data(closes, watch, kd_data):
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
             
-            # 調整欄寬
-            worksheet.set_column('E:E', 15)  
+            # Excel 欄寬配合名稱縮短，稍微調小
+            worksheet.set_column('E:E', 12)  
             worksheet.set_column('F:F', 12)  
             worksheet.set_column('G:Y', 10)  
             
-            # 凍結第一列和前五欄
             worksheet.freeze_panes(1, 5)
-            
-            # 新增：加入標題列自動篩選 (AutoFilter)
             worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
             
-            # 新增：條件格式化 (針對台股填滿淺黃色)
             tw_format = workbook.add_format({'bg_color': '#FFF9DB'})
             worksheet.conditional_format(1, 0, len(df), len(df.columns) - 1, {
                 'type': 'formula',
-                'criteria': '=$C2="台股"', # C欄是「市場」欄位
+                'criteria': '=$C2="台股"', 
                 'format': tw_format
             })
             
@@ -312,7 +316,7 @@ thead th {{ background:#eef1f5; color:#333; font-weight:600; font-size:12px; }}
 thead th.num {{ text-align:center; }} 
 tbody tr:last-child td {{ border-bottom:none; }} 
 td.num {{ text-align:center; font-variant-numeric:tabular-nums; }} 
-td.idx {{ color:var(--mute); width:30px; text-align:center; }} 
+td.idx {{ color:var(--mute); text-align:center; }} 
 .up {{ color:var(--up); font-weight:bold; }} .down {{ color:var(--down); font-weight:bold; }} .mute {{ color:var(--mute); }} 
 tr.grp td {{ background:#f0f3f7; font-weight:700; color:var(--head); position:static; box-shadow:none; }} 
 a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-decoration:underline; }}
@@ -326,26 +330,30 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
 .btn-download {{ background:#1b8e3a; color:#fff; width: 100%; max-width: 300px; }}
 
-/* === 終極凍結窗格 (Sticky Column) === */
+/* === 縮減欄寬的凍結窗格 (Sticky Column) === */
 .freeze-single {{
     position: -webkit-sticky; position: sticky; left: 0; z-index: 2;
     background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2);
 }}
 .freeze-idx {{
     position: -webkit-sticky; position: sticky; left: 0; z-index: 2;
-    background: #fff; min-width: 45px; max-width: 45px;
+    background: #fff; min-width: 25px; max-width: 25px; /* 縮減序號欄寬 */
+    padding-left: 4px; padding-right: 4px;
 }}
 .freeze-name {{
-    position: -webkit-sticky; position: sticky; left: 45px; z-index: 2;
+    position: -webkit-sticky; position: sticky; left: 25px; z-index: 2; /* 緊貼序號欄 */
     background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2);
+    min-width: 70px; max-width: 90px; /* 縮小名稱欄寬，配合名稱縮短 */
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding-left: 6px; padding-right: 6px;
 }}
 thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{
     background: #eef1f5; z-index: 3;
 }}
 
-/* === 新增：台股高亮淺黃底色 === */
-tr.tw-row td { background-color: #fff9db !important; }
-tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name { background-color: #fff9db !important; }
+/* === 台股高亮淺黃底色 (雙大括號) === */
+tr.tw-row td {{ background-color: #fff9db !important; }}
+tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{ background-color: #fff9db !important; }}
 </style></head><body><div class='wrap'>
 <h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
 
@@ -365,7 +373,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name { 
         weather = get_weather_icon(pct_val, 2.0)
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         
-        # 判斷是否為台股，加上 tw-row 樣式
         bg_cls = "tw-row" if row['市場'] == '台股' else ""
         
         html += f"<tr class='{bg_cls}'><td class='freeze-single'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
@@ -402,7 +409,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name { 
         ma20w_str = f"{ma20w:,.2f}" if pd.notna(ma20w) else "—"
         url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
         
-        # 判斷是否為台股，加上 tw-row 樣式
         bg_cls = "tw-row" if row['市場'] == '台股' else ""
         
         res = f"<tr class='{bg_cls}'><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
@@ -463,9 +469,8 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name { 
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V5.9 Excel 篩選與台股高亮版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V6.2 名稱縮寫微調版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
-            <!-- 移除 download 屬性，改用 target="_blank" 讓手機原生瀏覽器接管下載 -->
             <a href='report_data.xlsx' target='_blank' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
     </div>
