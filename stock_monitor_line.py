@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V6.4 雲端全自動版 - 符號保留與精準色彩管理)
+美股／台股監控推播系統 (V6.5 雲端全自動版 - 終極修復手機 Excel 下載)
 ---------------------------------------------------------------------------
-更新日誌 (V6.4): 
-- 依照需求保留所有表情符號 (天氣、紅綠燈、警告號)。
-- 全面套用台股習慣 (紅漲綠跌) 於 LINE 推播數值與文字。
-- 延續 V6.3 手機版 Excel 下載修復與 V6.2 名稱縮寫優化。
+更新日誌 (V6.5): 
+- 移除 Excel 下載按鈕的 download="中文檔名" 屬性，解決 Android/三星 Chrome 編碼衝突導致不支援下載的問題。
+- 改用最原始的 href="report_data.xlsx"，強迫手機系統底層接管檔案下載。
+- 延續 V6.4 的紅綠色彩管理與符號保留機制。
 """
 
 import os
@@ -291,7 +291,7 @@ def generate_html_report(df, vix_hist, news_data):
             return '<span class="badge b-down">🟢 日K超跌</span>'
         if any(k > 80 for k in kd_list):
             return '<span class="badge b-up">🔴 熱K>80</span>'
-        return '<span class="badge b-safe">✓ 線上安全</span>'
+        return '<span class="badge b-safe">✓ 線安全</span>'
         
     def get_dist_pct(last, ma20w):
         if pd.isna(last) or pd.isna(ma20w) or ma20w == 0: return "—"
@@ -432,7 +432,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         html += f"<li><a href='{item['link']}' target='_blank' style='font-weight:normal;'>{item['title']}</a></li>"
     html += "</ol>"
 
-    # ================= 沉底備註區塊 (並排縮減高度版) =================
+    # ================= 沉底備註區塊 =================
     html += """
     <div class="notes" style="margin-top: 24px; font-size: 12px; color: #666; background: #fcfcfc; padding: 16px; border-radius: 6px; border: 1px solid var(--line);">
         <b style="font-size: 13px; color: #333;">📝 燈號與位階判斷標準</b>
@@ -465,9 +465,10 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V6.4 符號保留與色彩精準版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V6.5 終極修復版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
-            <a href='./report_data.xlsx' download='股市監控報表.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
+            <!-- 完全移除干擾屬性，直接用 href 觸發原始檔案下載 -->
+            <a href='report_data.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
     </div>
     </div></body></html>
@@ -478,13 +479,12 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片 (紅綠色彩管理)
+# 組裝 LINE Flex Message 卡片 (紅綠色彩管理 + 符號全保留)
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist):
     today = dt.datetime.now()
     wd = "一二三四五六日"[today.weekday()]
     
-    # 顏色定義：紅漲綠跌
     C_UP = "#d32f2f"    # 紅色
     C_DOWN = "#1b8e3a"  # 綠色
     C_FLAT = "#8a9099"  # 灰色
@@ -506,12 +506,10 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             dchg = pct(last, prev)
             weather = get_weather_line(dchg)
             
-            # 漲=紅字，跌=綠字
             val_color = C_UP if diff > 0 else C_DOWN if diff < 0 else C_FLAT
             fmt_p = f"{last:,.0f}" if is_idx else f"{last:,.1f}"
             fmt_d = f"{diff:+,.0f}" if is_idx else f"{diff:+,.1f}"
             
-            # 保留天氣符號，只讓數值變色
             sec1.append({
                 "type": "text", "size": "sm", "wrap": True,
                 "contents": [
@@ -557,7 +555,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         if val_today is None or val_today <= 0:
             sec2.append({"type": "text", "text": f"{i}. {v_name} — (暫無報價)", "size": "sm", "color": "#8a9099"})
         else:
-            # 保留 🟢🔴 符號，小於 35 安全用綠字，大於 35 恐慌用紅字
             status = "🟢安全" if val_today < 35 else "🔴恐慌"
             c_color = C_DOWN if val_today < 35 else C_UP
             yest_str = f"昨日{val_yest:.1f}" if (val_yest and val_yest > 0) else "昨日—"
@@ -589,7 +586,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         
         if last and ma20w:
             dist = (last - ma20w) / ma20w * 100
-            # 保留 ⚠️🟢🔴 符號
             if dist < 0: status = "⚠️ 破線空手"
             else:
                 if kd_d and kd_d < 20: status = "🟢 日K超跌"
@@ -598,7 +594,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 else: status = "✓ 線上安全"
             
             ma_fmt = f"{ma20w:,.0f}" if item["yf"] == "^TWII" else f"{ma20w:,.1f}"
-            # 負數乖離綠字，正數乖離紅字
             dist_color = C_UP if dist > 0 else C_DOWN if dist < 0 else C_FLAT
             
             sec3.append({
@@ -634,7 +629,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         
         if drop or ko80:
             spans = [{"type": "span", "text": f"{alert_count}. {t['name']}: "}]
-            # 保留 🟢🔴 符號，跌破為綠字，過熱為紅字
             if drop: spans.append({"type": "span", "text": f"🟢[跌]{','.join(drop)} ", "color": C_DOWN})
             if ko80: spans.append({"type": "span", "text": f"🔴[熱]{'/'.join(ko80)}K>80", "color": C_UP})
             alerts.append({"type": "text", "size": "sm", "wrap": True, "contents": spans})
