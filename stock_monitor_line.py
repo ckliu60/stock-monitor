@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.8 雲端全自動版 - 終極手機凍結窗格與 Excel 修復)
+美股／台股監控推播系統 (V5.9 雲端全自動版 - Excel 篩選與台股高亮升級)
 ---------------------------------------------------------------------------
-更新日誌 (V5.8): 
-- 加入嚴格的 overflow-x: hidden 鎖定網頁本體寬度，確保只有表格區塊能左右滑動。
-- 加入 -webkit-sticky 確保 iOS 系統支援凍結窗格，並精準計算首行與次行距離。
+更新日誌 (V5.9): 
+- 修復手機瀏覽器下載 Excel 顯示不支援的問題（移除 download 屬性，改用 target="_blank" 喚起系統下載）。
+- Excel 產出時自動加入「第一列下拉式篩選 (AutoFilter)」。
+- 網頁與 Excel 皆新增「台股高亮功能」，只要是台股大盤或個股，整列套用淺黃色底色以利區別。
 """
 
 import os
@@ -208,6 +209,7 @@ def export_all_data(closes, watch, kd_data):
             workbook  = writer.book
             worksheet = writer.sheets['股市監控報表']
             
+            # 設定表頭格式
             header_format = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'center', 'align': 'center',
                 'fg_color': '#D7E4BC', 'border': 1
@@ -216,10 +218,24 @@ def export_all_data(closes, watch, kd_data):
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
             
+            # 調整欄寬
             worksheet.set_column('E:E', 15)  
             worksheet.set_column('F:F', 12)  
             worksheet.set_column('G:Y', 10)  
+            
+            # 凍結第一列和前五欄
             worksheet.freeze_panes(1, 5)
+            
+            # 新增：加入標題列自動篩選 (AutoFilter)
+            worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
+            
+            # 新增：條件格式化 (針對台股填滿淺黃色)
+            tw_format = workbook.add_format({'bg_color': '#FFF9DB'})
+            worksheet.conditional_format(1, 0, len(df), len(df.columns) - 1, {
+                'type': 'formula',
+                'criteria': '=$C2="台股"', # C欄是「市場」欄位
+                'format': tw_format
+            })
             
     except Exception as e:
         print(f"[錯誤] 無法產生 Excel 報表: {e}", file=sys.stderr)
@@ -287,10 +303,8 @@ def generate_html_report(df, vix_hist, news_data):
 <style>
 :root {{ --up:#d32f2f; --down:#1b8e3a; --line:#e3e6ea; --mute:#8a9099; --head:#1f3b66; }} 
 * {{ box-sizing:border-box; }} 
-/* 強制網頁本體不准左右滑動，只允許表格區域滑動 */
 body {{ margin:0; background:#f6f7f9; color:#222; font-family:'Microsoft JhengHei',system-ui,sans-serif; font-size:13px; padding-bottom:40px; overflow-x:hidden; }} 
 .wrap {{ max-width:960px; margin:0 auto; padding:16px; overflow-x:hidden; }} 
-/* 表格專屬滑動容器 */
 .table-container {{ width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; background:#fff; border:1px solid var(--line); border-radius:8px; margin-bottom: 20px; }}
 table {{ width:100%; border-collapse:collapse; background:#fff; }} 
 th,td {{ padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }} 
@@ -312,7 +326,7 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
 .btn-download {{ background:#1b8e3a; color:#fff; width: 100%; max-width: 300px; }}
 
-/* === 終極凍結窗格 (Sticky Column) 樣式 === */
+/* === 終極凍結窗格 (Sticky Column) === */
 .freeze-single {{
     position: -webkit-sticky; position: sticky; left: 0; z-index: 2;
     background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2);
@@ -328,6 +342,10 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{
     background: #eef1f5; z-index: 3;
 }}
+
+/* === 新增：台股高亮淺黃底色 === */
+tr.tw-row td { background-color: #fff9db !important; }
+tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name { background-color: #fff9db !important; }
 </style></head><body><div class='wrap'>
 <h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
 
@@ -347,7 +365,10 @@ thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{
         weather = get_weather_icon(pct_val, 2.0)
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         
-        html += f"<tr><td class='freeze-single'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
+        # 判斷是否為台股，加上 tw-row 樣式
+        bg_cls = "tw-row" if row['市場'] == '台股' else ""
+        
+        html += f"<tr class='{bg_cls}'><td class='freeze-single'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
         html += f"<td class='num'>{last:,.0f}</td>"
         html += fmt_net(net, is_idx=True)
         html += fmt_pct_td(pct_val)
@@ -381,7 +402,10 @@ thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{
         ma20w_str = f"{ma20w:,.2f}" if pd.notna(ma20w) else "—"
         url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
         
-        res = f"<tr><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
+        # 判斷是否為台股，加上 tw-row 樣式
+        bg_cls = "tw-row" if row['市場'] == '台股' else ""
+        
+        res = f"<tr class='{bg_cls}'><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
         res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
         res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td></tr>"
         return res
@@ -439,9 +463,10 @@ thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V5.8 手機完美凍結版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V5.9 Excel 篩選與台股高亮版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
-            <a href='report_data.xlsx' download='report_data.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
+            <!-- 移除 download 屬性，改用 target="_blank" 讓手機原生瀏覽器接管下載 -->
+            <a href='report_data.xlsx' target='_blank' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
     </div>
     </div></body></html>
