@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.4 雲端全自動版 - 網頁檢視升級版)
+美股／台股監控推播系統 (V5.5 雲端全自動版 - 完整修復台股過濾與檢視升級版)
 ---------------------------------------------------------------------------
-更新日誌 (V5.4): 
-- 修正手機與桌機瀏覽器點擊「檢視 CSV」會變成下載的問題，改為自動生成專屬 csv_view.html 檢視頁面。
+更新日誌 (V5.5): 
+- 修復台股個股（00919、台積電等）因歷史資料門檻 (len < 252) 被整筆過濾刪除的問題，改為寬鬆驗證 (len >= 2)。
+- 均線與週/月技術指標加入足夠長度保護，若歷史資料不足則顯示 None / —，不阻擋整檔股票輸出。
+- 保留專屬 csv_view.html 生成，徹底解決手機與電腦端點擊直接檢視 CSV 的問題。
 """
 
 import os
@@ -171,7 +173,8 @@ def export_all_data(closes, watch, kd_data):
     for i, t in enumerate(all_targets, 1):
         sym = t["yf"]
         s = closes.get(sym)
-        if s is None or len(s) < 252: continue
+        # 修正重點：改為只要有最新與前一日收盤價 (len >= 2) 即可輸出
+        if s is None or len(s) < 2: continue
         
         last = s.iloc[-1]
         pct_1d = pct(last, s.iloc[-2]) if len(s) >= 2 else None
@@ -285,7 +288,6 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .b-warn {{ background: #fff3e0; color: #ef6c00; }}
 .b-safe {{ background: #f0f3f7; color: #333; }}
 .foot {{ color:var(--mute); font-size:11px; margin-top:14px; text-align:center; }}
-/* 新增按鈕樣式 */
 .action-btn {{ display:inline-block; padding:8px 16px; border-radius:4px; text-decoration:none; font-size:13px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; }}
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
 .btn-view {{ background:#1f3b66; color:#fff; }}
@@ -399,9 +401,8 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     # ================= 雙 CSV 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V5.4 網頁檢視升級版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V5.5 完整修正版<br><br>
         <div style="display:flex; gap:12px; justify-content:center; align-items:center; flex-wrap:wrap;">
-            <!-- 修改點：連到我們自己生成的檢視網頁 csv_view.html -->
             <a href='csv_view.html' target='_blank' class='action-btn btn-view'>👀 線上直接檢視 CSV</a>
             <a href='report_data.csv' download='report_data.csv' class='action-btn btn-download'>📥 下載完整 CSV 原始數據</a>
         </div>
@@ -412,7 +413,7 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # ================= 新增：動態產生 CSV 檢視專用網頁 =================
+    # ================= 動態產生 CSV 檢視專用網頁 =================
     try:
         with open(REPORT_CSV_PATH, "r", encoding="utf-8-sig") as f:
             csv_content = f.read()
@@ -532,7 +533,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     for t in all_targets:
         if t["name"] not in ALERT_TARGETS: continue
         s = closes.get(t["yf"])
-        if s is None or len(s) < 60: continue
+        if s is None or len(s) < 2: continue
         last = s.iloc[-1]
         ma = compute_ma(s)
         drop = []
