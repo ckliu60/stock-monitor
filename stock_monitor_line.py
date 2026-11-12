@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V5.7 雲端全自動版 - 手機版凍結窗格升級)
+美股／台股監控推播系統 (V5.8 雲端全自動版 - 終極手機凍結窗格與 Excel 修復)
 ---------------------------------------------------------------------------
-更新日誌 (V5.7): 
-- 新增 HTML 表格「凍結窗格 (Sticky Column)」功能。在手機或小螢幕左右滑動檢視時，
-  「#」序號與「名稱」欄位會固定在畫面左側，並加上立體陰影，方便對照後方各項指標。
-- 延續 V5.6 產出 Excel 與 V5.5 寬鬆台股過濾的完整功能。
+更新日誌 (V5.8): 
+- 加入嚴格的 overflow-x: hidden 鎖定網頁本體寬度，確保只有表格區塊能左右滑動。
+- 加入 -webkit-sticky 確保 iOS 系統支援凍結窗格，並精準計算首行與次行距離。
 """
 
 import os
@@ -282,16 +281,18 @@ def generate_html_report(df, vix_hist, news_data):
         mark = '+' if dist > 0 else ''
         return f"{mark}{dist:.1f}%"
 
-    html = f"""<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>股市監控報表</title>
+    html = f"""<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no'>
+<title>股市監控報表</title>
 <style>
 :root {{ --up:#d32f2f; --down:#1b8e3a; --line:#e3e6ea; --mute:#8a9099; --head:#1f3b66; }} 
 * {{ box-sizing:border-box; }} 
-body {{ margin:0; background:#f6f7f9; color:#222; font-family:'Microsoft JhengHei',system-ui,sans-serif; font-size:13px; padding-bottom:40px; }} 
-.wrap {{ max-width:960px; margin:0 auto; padding:16px; }} 
-h1 {{ font-size:18px; margin:4px 0; }} 
-h2 {{ font-size:14px; margin:24px 0 8px; color:var(--head); border-left:4px solid var(--head); padding-left:8px; }} 
-.sub {{ color:var(--mute); font-size:12px; margin-bottom:6px; }} 
-table {{ width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }} 
+/* 強制網頁本體不准左右滑動，只允許表格區域滑動 */
+body {{ margin:0; background:#f6f7f9; color:#222; font-family:'Microsoft JhengHei',system-ui,sans-serif; font-size:13px; padding-bottom:40px; overflow-x:hidden; }} 
+.wrap {{ max-width:960px; margin:0 auto; padding:16px; overflow-x:hidden; }} 
+/* 表格專屬滑動容器 */
+.table-container {{ width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; background:#fff; border:1px solid var(--line); border-radius:8px; margin-bottom: 20px; }}
+table {{ width:100%; border-collapse:collapse; background:#fff; }} 
 th,td {{ padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }} 
 thead th {{ background:#eef1f5; color:#333; font-weight:600; font-size:12px; }} 
 thead th.num {{ text-align:center; }} 
@@ -299,7 +300,7 @@ tbody tr:last-child td {{ border-bottom:none; }}
 td.num {{ text-align:center; font-variant-numeric:tabular-nums; }} 
 td.idx {{ color:var(--mute); width:30px; text-align:center; }} 
 .up {{ color:var(--up); font-weight:bold; }} .down {{ color:var(--down); font-weight:bold; }} .mute {{ color:var(--mute); }} 
-tr.grp td {{ background:#f0f3f7; font-weight:700; color:var(--head); }} 
+tr.grp td {{ background:#f0f3f7; font-weight:700; color:var(--head); position:static; box-shadow:none; }} 
 a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-decoration:underline; }}
 .badge {{ padding: 3px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; display: inline-block; }}
 .b-up {{ background: #ffebee; color: #d32f2f; }}
@@ -307,41 +308,33 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .b-warn {{ background: #fff3e0; color: #ef6c00; }}
 .b-safe {{ background: #f0f3f7; color: #333; }}
 .foot {{ color:var(--mute); font-size:11px; margin-top:14px; text-align:center; }}
-.action-btn {{ display:inline-block; padding:8px 16px; border-radius:4px; text-decoration:none; font-size:13px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; }}
+.action-btn {{ display:inline-block; padding:10px 20px; border-radius:4px; text-decoration:none; font-size:14px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; margin-top: 10px; }}
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
-.btn-download {{ background:#1b8e3a; color:#fff; }}
+.btn-download {{ background:#1b8e3a; color:#fff; width: 100%; max-width: 300px; }}
 
-/* === 新增凍結窗格 (Sticky Column) 樣式 === */
-.sticky-col-idx {{
-    position: sticky;
-    left: 0;
-    background: #fff;
-    z-index: 2;
+/* === 終極凍結窗格 (Sticky Column) 樣式 === */
+.freeze-single {{
+    position: -webkit-sticky; position: sticky; left: 0; z-index: 2;
+    background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2);
 }}
-.sticky-col-name {{
-    position: sticky;
-    left: 35px; /* 這裡要根據 .sticky-col-idx 的寬度微調 */
-    background: #fff;
-    z-index: 2;
-    box-shadow: 2px 0 4px -2px rgba(0,0,0,0.15); /* 加點右側立體陰影 */
+.freeze-idx {{
+    position: -webkit-sticky; position: sticky; left: 0; z-index: 2;
+    background: #fff; min-width: 45px; max-width: 45px;
 }}
-/* 讓群組標題那行不受影響 */
-tr.grp td.sticky-col-idx, tr.grp td.sticky-col-name {{
-    position: static;
-    box-shadow: none;
+.freeze-name {{
+    position: -webkit-sticky; position: sticky; left: 45px; z-index: 2;
+    background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2);
 }}
-/* 表頭凍結背景色維持原本的淺灰 */
-thead th.sticky-col-idx, thead th.sticky-col-name {{
-    background: #eef1f5;
-    z-index: 3; /* 表頭要在更上層 */
+thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{
+    background: #eef1f5; z-index: 3;
 }}
 </style></head><body><div class='wrap'>
 <h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
 
 <h2>大盤與 VIX 狀況 (+/- 2%)</h2>
-<div style='overflow-x:auto;'><table>
+<div class='table-container'><table>
 <thead><tr>
-    <th class='sticky-col-name'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th>
+    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th>
 </tr></thead><tbody>
 """
     
@@ -354,7 +347,7 @@ thead th.sticky-col-idx, thead th.sticky-col-name {{
         weather = get_weather_icon(pct_val, 2.0)
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         
-        html += f"<tr><td class='sticky-col-name'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
+        html += f"<tr><td class='freeze-single'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
         html += f"<td class='num'>{last:,.0f}</td>"
         html += fmt_net(net, is_idx=True)
         html += fmt_pct_td(pct_val)
@@ -364,15 +357,15 @@ thead th.sticky-col-idx, thead th.sticky-col-name {{
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
-            html += f"<tr><td class='sticky-col-name'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
         else:
             status = "<span class='badge b-down'>🟢 安全</span>" if val < 35 else "<span class='badge b-up'>🔴 恐慌</span>"
-            html += f"<tr><td class='sticky-col-name'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
             
     html += "</tbody></table></div>"
     
-    html += "<h2>個股追蹤清單</h2><div style='overflow-x:auto;'><table><thead><tr>"
-    html += "<th class='num sticky-col-idx'>#</th><th class='sticky-col-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th></tr></thead><tbody>"
+    html += "<h2>個股追蹤清單</h2><div class='table-container'><table><thead><tr>"
+    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th></tr></thead><tbody>"
 
     def render_stock_row(row, idx):
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
@@ -388,7 +381,7 @@ thead th.sticky-col-idx, thead th.sticky-col-name {{
         ma20w_str = f"{ma20w:,.2f}" if pd.notna(ma20w) else "—"
         url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
         
-        res = f"<tr><td class='num idx sticky-col-idx'>{idx}</td><td class='name sticky-col-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
+        res = f"<tr><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
         res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
         res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td></tr>"
         return res
@@ -446,9 +439,9 @@ thead th.sticky-col-idx, thead th.sticky-col-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V5.7 凍結窗格升級版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V5.8 手機完美凍結版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
-            <a href='report_data.xlsx' download='report_data.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 數據表</a>
+            <a href='report_data.xlsx' download='report_data.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
     </div>
     </div></body></html>
