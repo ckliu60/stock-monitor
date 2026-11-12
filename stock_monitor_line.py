@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V6.5 雲端全自動版 - 終極修復手機 Excel 下載)
+美股／台股監控推播系統 (V6.6 雲端全自動版 - 英文檔名與下載終極修復)
 ---------------------------------------------------------------------------
-更新日誌 (V6.5): 
-- 移除 Excel 下載按鈕的 download="中文檔名" 屬性，解決 Android/三星 Chrome 編碼衝突導致不支援下載的問題。
-- 改用最原始的 href="report_data.xlsx"，強迫手機系統底層接管檔案下載。
-- 延續 V6.4 的紅綠色彩管理與符號保留機制。
+更新日誌 (V6.6): 
+- 將 Excel 下載檔名強制指定為英文 (stock_monitor.xlsx) 以避開手機編碼錯誤。
+- 移除 target="_blank" 屬性，防止 Android Chrome 防彈跳機制攔截下載。
+- 延續 V6.4 的紅綠色彩管理與全部圖案符號保留機制。
 """
 
 import os
@@ -291,7 +291,7 @@ def generate_html_report(df, vix_hist, news_data):
             return '<span class="badge b-down">🟢 日K超跌</span>'
         if any(k > 80 for k in kd_list):
             return '<span class="badge b-up">🔴 熱K>80</span>'
-        return '<span class="badge b-safe">✓ 線安全</span>'
+        return '<span class="badge b-safe">✓ 線上安全</span>'
         
     def get_dist_pct(last, ma20w):
         if pd.isna(last) or pd.isna(ma20w) or ma20w == 0: return "—"
@@ -465,10 +465,10 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V6.5 終極修復版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V6.6 終極下載修復版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
-            <!-- 完全移除干擾屬性，直接用 href 觸發原始檔案下載 -->
-            <a href='report_data.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
+            <!-- 移除 target="_blank"，使用純英文檔名強制覆蓋，繞過手機編碼與彈窗阻擋 -->
+            <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
     </div>
     </div></body></html>
