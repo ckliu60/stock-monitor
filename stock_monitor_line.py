@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V6.7 雲端全自動版 - 獨立下載修復日期與 Excel 白底)
+美股／台股監控推播系統 (V6.9 雲端全自動版 - 100% 試算表控制解耦版)
 ---------------------------------------------------------------------------
-更新日誌 (V6.7): 
-- 將 yfinance 的「批次下載」改為「迴圈獨立下載」，徹底解決跨時區對齊導致台股最新報價被吃掉的 Bug。
-- 在產生 Excel 時強制鋪上純白底色 (#FFFFFF)，防止手機深色模式將透明背景轉為黑色。
-- 延續 V6.6 的紅綠色彩管理、符號保留機制與下載相容性修復。
+更新日誌 (V6.9): 
+- 移除所有寫死的 INDICES 與 ALERT_TARGETS，全面由 Google 試算表的「群組」欄位控制。
+- 邏輯規則：群組為「大盤」與「核心」會觸發 LINE 推播與技術警示；群組為「觀察」僅顯示於報表。
+- 延續縮寫防換行 (包含台大盤、台積、0050)、獨立下載修復與紅綠色彩管理。
 """
 
 import os
@@ -30,19 +30,6 @@ import yfinance as yf
 # 設定區
 # ---------------------------------------------------------------------------
 
-INDICES = [
-    ("^DJI", "道瓊"),
-    ("^IXIC", "那指"),
-    ("^GSPC", "標普"),
-    ("^SOX", "費半"),
-]
-
-ALERT_TARGETS = [
-    "道瓊", "那指", "標普", "費半",
-    "台積電ADR", "輝達", "特斯拉", "SpaceX",
-    "台積電", "聯發科", "元大台灣50"
-]
-
 MA_WINDOWS = [("MA10", 10), ("MA20", 20), ("MA60", 60), ("MA240", 240)]
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRa7RG_nKx8DTBSsOsBPz4MQZPw_mYByDYy7hux2MwuhqRn1VIvqr5XWiZttrW24A/pub?gid=1903088963&single=true&output=csv"
@@ -57,10 +44,13 @@ REPORT_EXCEL_PATH = PUBLIC_DIR / "report_data.xlsx"
 # ---------------------------------------------------------------------------
 
 def shorten_name(name):
+    """極致縮短名稱，避免手機版 LINE 斷行"""
     n = name.strip()
     if "群益台灣精選高息" in n: return "00919"
     if "元大台灣50" in n: return "0050"
     if n == "台積電ADR": return "台積電R"
+    if n == "台積電": return "台積"
+    if n == "台股大盤": return "台大盤"
     return n
 
 def load_watchlist():
@@ -97,17 +87,12 @@ def load_watchlist():
     return rows
 
 def fetch_data_individually(symbols, period="2y"):
-    """
-    V6.7 修正核心：改為一檔一檔抓，避免 yfinance 合併下載時發生跨時區對齊 Bug，
-    導致提早收盤的台股最新日 K 棒被美股時間軸強制刪除。
-    """
     closes = {}
     for sym in symbols:
         try:
             df = yf.download(sym, period=period, interval="1d", auto_adjust=False, progress=False)
             if df.empty: continue
             
-            # yfinance 新版 API 會將單檔股票也包裝成 MultiIndex，需攤平
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
                 
@@ -181,13 +166,10 @@ def fetch_yahoo_news(limit=5):
 # 匯出與報表生成
 # ---------------------------------------------------------------------------
 def export_all_data(closes, watch, kd_data):
-    all_targets = [{"market": "美股", "code": s, "name": n, "yf": s, "group": "核心"} for s, n in INDICES] + \
-                  [{"market": "台股", "code": "^TWII", "name": "台股大盤", "yf": "^TWII", "group": "核心"}] + \
-                  [{"market": w["market"], "code": w["code"], "name": w["name"], "yf": w["yf_symbol"], "group": w["group"]} for w in watch]
-    
+    # V6.9 直接使用 watch 清單，不再混入寫死的陣列
     rows = []
-    for i, t in enumerate(all_targets, 1):
-        sym = t["yf"]
+    for i, w in enumerate(watch, 1):
+        sym = w["yf_symbol"]
         s = closes.get(sym)
         if s is None or len(s) < 2: continue
         
@@ -206,8 +188,8 @@ def export_all_data(closes, watch, kd_data):
         kd_m = kd.get("月", (None, None))
         
         row = {
-            "序號": i, "群組": t["group"], "市場": t["market"], "代碼": t["code"],
-            "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2), "資料日期": s.index[-1].strftime("%Y-%m-%d"),
+            "序號": i, "群組": w["group"], "市場": w["market"], "代碼": w["code"],
+            "名稱": w["name"], "yf_symbol": sym, "最新收盤": round(last, 2), "資料日期": s.index[-1].strftime("%Y-%m-%d"),
             "當日漲跌": round(net_1d, 2) if net_1d is not None else None,
             "當日%": round(pct_1d, 2) if pct_1d is not None else None,
             "週%": round(pct_1w, 2) if pct_1w is not None else None,
@@ -227,9 +209,7 @@ def export_all_data(closes, watch, kd_data):
             workbook  = writer.book
             worksheet = writer.sheets['股市監控報表']
             
-            # V6.7 強制設定白底 (避免手機深色模式透明變黑)
             white_bg = workbook.add_format({'bg_color': '#FFFFFF'})
-            
             header_format = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'center', 'align': 'center',
                 'fg_color': '#D7E4BC', 'border': 1
@@ -238,7 +218,6 @@ def export_all_data(closes, watch, kd_data):
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
             
-            # 設定欄寬時，同時鋪上白底色
             worksheet.set_column('A:D', 10, white_bg)
             worksheet.set_column('E:E', 12, white_bg)  
             worksheet.set_column('F:F', 12, white_bg)  
@@ -263,10 +242,10 @@ def generate_html_report(df, vix_hist, news_data):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_str = dt.datetime.now(tw_tz).strftime("%Y/%m/%d %H:%M")
     
-    idx_df = df[df['名稱'].isin([n for _, n in INDICES])]
-    tw_idx = df[df['名稱'] == '台股大盤']
-    us_stocks = df[(df['市場'] == '美股') & (~df['名稱'].isin([n for _, n in INDICES]))]
-    tw_stocks = df[(df['市場'] == '台股') & (df['名稱'] != '台股大盤')]
+    # 根據群組動態分類報表區塊
+    idx_df = df[df['群組'] == '大盤']
+    us_stocks = df[(df['市場'] == '美股') & (df['群組'] != '大盤')]
+    tw_stocks = df[(df['市場'] == '台股') & (df['群組'] != '大盤')]
     
     def fmt_net(val, is_idx=False):
         if pd.isna(val): return '<td class="num mute">—</td>'
@@ -375,7 +354,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 </tr></thead><tbody>
 """
     
-    for _, row in pd.concat([idx_df, tw_idx]).iterrows():
+    for _, row in idx_df.iterrows():
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
         ma20, ma60, ma240, ma20w = row['MA20'], row['MA60'], row['MA240'], row['MA20週']
         kd_d, kd_w, kd_m = row['日K'], row['週K'], row['月K']
@@ -480,7 +459,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V6.7 日期修復與白底版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V6.9 解耦試算表控制版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -493,15 +472,15 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片 (紅綠色彩管理 + 符號全保留)
+# 組裝 LINE Flex Message 卡片
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist):
     today = dt.datetime.now()
     wd = "一二三四五六日"[today.weekday()]
     
-    C_UP = "#d32f2f"    # 紅色
-    C_DOWN = "#1b8e3a"  # 綠色
-    C_FLAT = "#8a9099"  # 灰色
+    C_UP = "#d32f2f"
+    C_DOWN = "#1b8e3a"
+    C_FLAT = "#8a9099"
     
     contents = [
         { "type": "text", "text": f"📊 股市核心快報 {today.month:02d}/{today.day:02d} ({wd})", "weight": "bold", "size": "md", "color": "#1f3b66" },
@@ -536,28 +515,25 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
             return True
         return False
 
-    for sym, name in INDICES:
-        add_sec1_item(name, closes.get(sym), True)
-        
+    core_items = []
+    # 1. 抓取試算表中設定為「大盤」的標的
+    for w in watch:
+        if w["group"] == "大盤":
+            s = closes.get(w["yf_symbol"])
+            add_sec1_item(w["name"], s, True)
+            if w["market"] == "台股":
+                core_items.append({"name": w["name"], "yf": w["yf_symbol"], "last": s.iloc[-1] if s is not None and not s.empty else None, "ma20w": weekly_ma(s, 20) if s is not None else None})
+                
     sec1.append({"type": "text", "text": "-" * 15, "size": "sm", "color": "#8a9099"})
     
-    core_items = []
-    seen_core = set()
-    s_twii = closes.get("^TWII")
-    
-    if add_sec1_item("台股大盤", s_twii, True):
-        core_items.append({"name": "台股大盤", "yf": "^TWII", "last": s_twii.iloc[-1], "ma20w": weekly_ma(s_twii, 20)})
-        
+    # 2. 抓取試算表中設定為「核心」的標的
     for w in watch:
-        sym = w["yf_symbol"]
-        if ("2330" in sym or "0050" in sym) and "正2" not in w["name"] and "反1" not in w["name"]:
-            if sym in seen_core: continue
-            seen_core.add(sym)
-            s = closes.get(sym)
-            display_name = w["name"] if "0050" not in sym or "元大" in w["name"] else "元大台灣50"
-            if add_sec1_item(display_name, s, False):
-                core_items.append({"name": display_name, "yf": sym, "last": s.iloc[-1], "ma20w": weekly_ma(s, 20)})
-                
+        if w["group"] == "核心":
+            s = closes.get(w["yf_symbol"])
+            add_sec1_item(w["name"], s, False)
+            if w["market"] == "台股":
+                core_items.append({"name": w["name"], "yf": w["yf_symbol"], "last": s.iloc[-1] if s is not None and not s.empty else None, "ma20w": weekly_ma(s, 20) if s is not None else None})
+
     contents.extend(sec1)
     contents.append({"type": "separator", "margin": "md"})
     
@@ -587,6 +563,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     # ▌三、台股核心指標
     sec3 = [{"type": "text", "text": "▌三、台股核心指標 (K<20)", "size": "sm", "color": "#333333"}]
     for i, item in enumerate(core_items, 1):
+        if item["last"] is None: continue
         kd = kd_data.get(item["yf"], {})
         kd_d = kd.get("日", (None,))[0]
         kd_w = kd.get("週", (None,))[0]
@@ -621,15 +598,16 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     contents.extend(sec3)
     contents.append({"type": "separator", "margin": "md"})
     
-    # ▌四、其他位階警示
+    # ▌四、其他位階警示 (只要是「大盤」或「核心」皆會判定)
     sec4 = [{"type": "text", "text": "▌四、其他位階警示", "size": "sm", "color": "#333333"}]
     alerts = []
-    all_targets = [{"name": n, "yf": s} for s, n in INDICES] + [{"name": w["name"], "yf": w["yf_symbol"]} for w in watch]
     alert_count = 1
-    for t in all_targets:
-        if t["name"] not in ALERT_TARGETS: continue
-        s = closes.get(t["yf"])
+    for w in watch:
+        if w["group"] not in ["大盤", "核心"]: continue
+        sym = w["yf_symbol"]
+        s = closes.get(sym)
         if s is None or len(s) < 2: continue
+        
         last = s.iloc[-1]
         ma = compute_ma(s)
         drop = []
@@ -638,11 +616,11 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         w_ret = pct(last, s.iloc[-6]) if len(s)>=6 else None
         m_ret = pct(last, s.iloc[-22]) if len(s)>=22 else None
         if (w_ret and w_ret <= -20) or (m_ret and m_ret <= -20): drop.append("週/月跌>20%")
-        kd = kd_data.get(t["yf"], {})
+        kd = kd_data.get(sym, {})
         ko80 = [tf for tf in ["日", "週", "月"] if kd.get(tf) and kd[tf][0] is not None and kd[tf][0] > 80]
         
         if drop or ko80:
-            spans = [{"type": "span", "text": f"{alert_count}. {t['name']}: "}]
+            spans = [{"type": "span", "text": f"{alert_count}. {w['name']}: "}]
             if drop: spans.append({"type": "span", "text": f"🟢[跌]{','.join(drop)} ", "color": C_DOWN})
             if ko80: spans.append({"type": "span", "text": f"🔴[熱]{'/'.join(ko80)}K>80", "color": C_UP})
             alerts.append({"type": "text", "size": "sm", "wrap": True, "contents": spans})
@@ -678,11 +656,9 @@ def main():
     force_dry_run = "--dry-run" in sys.argv
     watch = load_watchlist()
     
-    idx_syms = [s for s, _ in INDICES]
-    stk_syms = [w["yf_symbol"] for w in watch]
-    all_syms = list(set(idx_syms + stk_syms + ["^TWII"]))
+    # 自動擷取需要抓取的代碼 (由試算表驅動)
+    all_syms = list(set([w["yf_symbol"] for w in watch]))
     
-    # 改為獨立下載，解決時區被吃掉的 Bug
     closes = fetch_data_individually(all_syms)
 
     vix_hist = {}
