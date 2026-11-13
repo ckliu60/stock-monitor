@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V6.6 雲端全自動版 - 英文檔名與下載終極修復)
+美股／台股監控推播系統 (V6.7 雲端全自動版 - 獨立下載修復日期與 Excel 白底)
 ---------------------------------------------------------------------------
-更新日誌 (V6.6): 
-- 將 Excel 下載檔名強制指定為英文 (stock_monitor.xlsx) 以避開手機編碼錯誤。
-- 移除 target="_blank" 屬性，防止 Android Chrome 防彈跳機制攔截下載。
-- 延續 V6.4 的紅綠色彩管理與全部圖案符號保留機制。
+更新日誌 (V6.7): 
+- 將 yfinance 的「批次下載」改為「迴圈獨立下載」，徹底解決跨時區對齊導致台股最新報價被吃掉的 Bug。
+- 在產生 Excel 時強制鋪上純白底色 (#FFFFFF)，防止手機深色模式將透明背景轉為黑色。
+- 延續 V6.6 的紅綠色彩管理、符號保留機制與下載相容性修復。
 """
 
 import os
@@ -96,14 +96,24 @@ def load_watchlist():
         })
     return rows
 
-def fetch_data(symbols, period="2y"):
-    data = yf.download(symbols, period=period, interval="1d", auto_adjust=False, progress=False, group_by="column")
+def fetch_data_individually(symbols, period="2y"):
+    """
+    V6.7 修正核心：改為一檔一檔抓，避免 yfinance 合併下載時發生跨時區對齊 Bug，
+    導致提早收盤的台股最新日 K 棒被美股時間軸強制刪除。
+    """
     closes = {}
     for sym in symbols:
         try:
-            c = data["Close"]
-            s = c[sym] if isinstance(c, pd.DataFrame) else c
-            closes[sym] = s.dropna()
+            df = yf.download(sym, period=period, interval="1d", auto_adjust=False, progress=False)
+            if df.empty: continue
+            
+            # yfinance 新版 API 會將單檔股票也包裝成 MultiIndex，需攤平
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+                
+            if "Close" in df:
+                s = df["Close"]
+                closes[sym] = s.dropna()
         except: pass
     return closes
 
@@ -217,6 +227,9 @@ def export_all_data(closes, watch, kd_data):
             workbook  = writer.book
             worksheet = writer.sheets['股市監控報表']
             
+            # V6.7 強制設定白底 (避免手機深色模式透明變黑)
+            white_bg = workbook.add_format({'bg_color': '#FFFFFF'})
+            
             header_format = workbook.add_format({
                 'bold': True, 'text_wrap': True, 'valign': 'center', 'align': 'center',
                 'fg_color': '#D7E4BC', 'border': 1
@@ -225,9 +238,11 @@ def export_all_data(closes, watch, kd_data):
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
             
-            worksheet.set_column('E:E', 12)  
-            worksheet.set_column('F:F', 12)  
-            worksheet.set_column('G:Y', 10)  
+            # 設定欄寬時，同時鋪上白底色
+            worksheet.set_column('A:D', 10, white_bg)
+            worksheet.set_column('E:E', 12, white_bg)  
+            worksheet.set_column('F:F', 12, white_bg)  
+            worksheet.set_column('G:Y', 10, white_bg)  
             
             worksheet.freeze_panes(1, 5)
             worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
@@ -465,9 +480,8 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V6.6 終極下載修復版<br><br>
+        資料來源：Yahoo Finance ｜ 報表產生器：V6.7 日期修復與白底版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
-            <!-- 移除 target="_blank"，使用純英文檔名強制覆蓋，繞過手機編碼與彈窗阻擋 -->
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
     </div>
@@ -667,10 +681,12 @@ def main():
     idx_syms = [s for s, _ in INDICES]
     stk_syms = [w["yf_symbol"] for w in watch]
     all_syms = list(set(idx_syms + stk_syms + ["^TWII"]))
-    closes = fetch_data(all_syms)
+    
+    # 改為獨立下載，解決時區被吃掉的 Bug
+    closes = fetch_data_individually(all_syms)
 
-    v_data = fetch_data(["^VIX", "^VIXTWN"], period="1mo")
     vix_hist = {}
+    v_data = fetch_data_individually(["^VIX", "^VIXTWN"], period="1mo")
     for v_sym in ["^VIX", "^VIXTWN"]:
         s = v_data.get(v_sym)
         if s is not None and len(s) >= 6:
@@ -681,14 +697,16 @@ def main():
             vix_hist[v_sym] = [0, 0, 0, 0]
 
     kd_data = {}
-    try:
-        raw_kd = yf.download(all_syms, period="2y", interval="1d", auto_adjust=False, progress=False, group_by="ticker")
-        for sym in all_syms:
-            df = raw_kd if len(all_syms) == 1 else raw_kd[sym]
-            if "Close" in df:
-                df = df[["High", "Low", "Close"]].dropna()
-                kd_data[sym] = kd_timeframes(df)
-    except: pass
+    for sym in all_syms:
+        try:
+            df = yf.download(sym, period="2y", interval="1d", auto_adjust=False, progress=False)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                if "Close" in df:
+                    df = df[["High", "Low", "Close"]].dropna()
+                    kd_data[sym] = kd_timeframes(df)
+        except: pass
 
     news_data = fetch_yahoo_news(limit=5)
     df_report = export_all_data(closes, watch, kd_data)
