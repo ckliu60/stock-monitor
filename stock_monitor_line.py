@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V8.1 雙燈號與自訂顏色修復版)
+美股／台股監控推播系統 (V8.2 清爽字體版)
 ---------------------------------------------------------------------------
-更新日誌 (V8.1):
-1. [修復 NameError] 修正 generate_html_report 內部直接從 df 讀取核心清單，解決 watch 未定義報錯。
+更新日誌 (V8.2):
+1. [視覺減壓] 移除 LINE 圖卡與 HTML 網頁報表中「四、其他位階警示」的所有粗體設定，改為清爽一般字體。
 2. [長短線雙燈號架構] 完美對接試算表新增的 5MA, 10MA 與短線燈號欄位。
-3. [極簡短線動能] 自動判定「🔥雙線站上」、「⚡站回五日」、「⚠️雙線跌破」。
-4. [自訂警示顏色] 網頁與 LINE 圖卡同步：跌破季線標綠色 🟢，跌破年線標紅色 🔴。
+3. [自訂警示顏色] 網頁與 LINE 圖卡同步：跌破季線標綠色 🟢，跌破年線標紅色 🔴。
 """
 
 import os
@@ -690,11 +689,10 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         
     html += "</tbody></table></div>"
 
-    # ================= 專屬短線與位階警示區塊 =================
+    # ================= 專屬短線與位階警示區塊 (已移除粗體) =================
     html += "<h2>四、其他位階警示</h2>"
     html += "<ol style='line-height:1.8; font-size:14px; padding-left:24px; margin-bottom:24px;'>"
     
-    # 直接從 df 篩選大盤與長線核心標的，避免 watch 未定義問題
     alert_df = df[df['長線燈號'].isin(['大盤', '核心'])]
     
     alert_count_html = 0
@@ -704,13 +702,13 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         ma240 = r['MA240']
         
         drop = []
-        # 跌破季線標綠色 🟢，跌破年線標紅色 🔴
-        if pd.notna(ma60) and last < ma60: drop.append("<span style='color:#1b8e3a; font-weight:bold;'>🟢[跌]破季線</span>")
-        if pd.notna(ma240) and last < ma240: drop.append("<span style='color:#d32f2f; font-weight:bold;'>🔴[跌]破年線</span>")
+        # 跌破季線標綠色 🟢，跌破年線標紅色 🔴 (一般字體，不加粗)
+        if pd.notna(ma60) and last < ma60: drop.append("<span style='color:#1b8e3a;'>🟢[跌]破季線</span>")
+        if pd.notna(ma240) and last < ma240: drop.append("<span style='color:#d32f2f;'>🔴[跌]破年線</span>")
         
         w_ret, m_ret = r['週%'], r['月%']
         if (pd.notna(w_ret) and w_ret <= -20) or (pd.notna(m_ret) and m_ret <= -20): 
-            drop.append("<span style='color:#1b8e3a; font-weight:bold;'>🟢週/月跌>20%</span>")
+            drop.append("<span style='color:#1b8e3a;'>🟢週/月跌>20%</span>")
             
         ko80 = []
         if pd.notna(r['日K']) and r['日K'] > 80: ko80.append("日")
@@ -718,9 +716,9 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         if pd.notna(r['月K']) and r['月K'] > 80: ko80.append("月")
         
         if drop or ko80:
-            li_html = f"<li><b>{r['名稱']}</b>: "
+            li_html = f"<li>{r['名稱']}: "
             if drop: li_html += " ".join(drop) + " "
-            if ko80: li_html += f"<span style='color:#d32f2f; font-weight:bold;'>🔴[熱]{'/'.join(ko80)}K>80</span>"
+            if ko80: li_html += f"<span style='color:#d32f2f;'>🔴[熱]{'/'.join(ko80)}K>80</span>"
             li_html += "</li>"
             html += li_html
             alert_count_html += 1
@@ -757,8 +755,8 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             </div>
             <div style="flex: 1 1 220px;">
                 <b style="color:#1f3b66;">3. 其他位階與當日燈號</b><br>
-                <span style="color:#1b8e3a; font-weight:bold;">🟢[跌]破季線</span>：跌破 60MA (中線轉弱)<br>
-                <span style="color:#d32f2f; font-weight:bold;">🔴[跌]破年線</span>：跌破 240MA (長線警戒)<br>
+                <span style="color:#1b8e3a;">🟢[跌]破季線</span>：跌破 60MA (中線轉弱)<br>
+                <span style="color:#d32f2f;">🔴[跌]破年線</span>：跌破 240MA (長線警戒)<br>
                 ☀️ 大漲(大盤≥2%/個股≥5%) ｜ ⛈️ 大跌
             </div>
         </div>
@@ -768,7 +766,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.1 雙燈號與自訂顏色修復版<br><br>
+        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.2 清爽字體版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -891,7 +889,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
             "type": "text", "size": "sm", "wrap": True,
             "contents": [
                 {"type": "span", "text": f"   K值: 日{int(kd_d) if pd.notna(kd_d) else '-'}/週{int(kd_w) if pd.notna(kd_w) else '-'}/月{int(kd_m) if pd.notna(kd_m) else '-'}｜短線: ", "color": "#666666"},
-                {"type": "span", "text": short_status, "color": short_color, "weight": "bold"}
+                {"type": "span", "text": short_status, "color": short_color}
             ]
         })
         
@@ -918,6 +916,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     contents.extend(sec3)
     contents.append({"type": "separator", "margin": "md"})
     
+    # ================= 四、其他位階警示 (已移除粗體) =================
     sec4 = [{"type": "text", "text": "▌四、其他位階警示", "size": "sm", "color": "#333333"}]
     alerts = []
     alert_df = df_report[df_report['長線燈號'].isin(['大盤', '核心'])]
@@ -939,11 +938,11 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
         
         if drop_q or drop_y or drop_20 or ko80:
             spans = [{"type": "span", "text": f"{alert_count}. {r['名稱']}: "}]
-            # 跌破季線標綠色 🟢，跌破年線標紅色 🔴
+            # 跌破季線標綠色 🟢，跌破年線標紅色 🔴 (一般字體，不加粗)
             if drop_q:
-                spans.append({"type": "span", "text": "🟢[跌]破季線 ", "color": C_DOWN, "weight": "bold"})
+                spans.append({"type": "span", "text": "🟢[跌]破季線 ", "color": C_DOWN})
             if drop_y:
-                spans.append({"type": "span", "text": "🔴[跌]破年線 ", "color": C_UP, "weight": "bold"})
+                spans.append({"type": "span", "text": "🔴[跌]破年線 ", "color": C_UP})
             if drop_20:
                 spans.append({"type": "span", "text": "🟢週/月跌>20% ", "color": C_DOWN})
             if ko80:
