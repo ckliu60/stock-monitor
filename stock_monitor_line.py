@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V7.1 雲端與內建雙重保底 + 稽核精準版)
+美股／台股監控推播系統 (V7.2 純雲端試算表驅動 + 雙源自動稽核版)
 ---------------------------------------------------------------------------
-更新日誌 (V7.1):
-1. [綁定最新雲端主檔] 已更新 SHEET_CSV_URL 為老爺最新發布的專屬 CSV 連結 (gid=855107288)。
-2. [20檔完整保底合併] 內建老爺最新確認的 20 檔標的（含 00929、1303南亞、SPCX、微軟），即使雲端 CSV 尚未同步或被快取擋住，也能 100% 自動補齊顯示。
-3. [消除週末假警報] 美股基準日計算強制排除 24 小時交易的加密貨幣 (BTC-USD)，解決週六日美股被誤判為「日期落後」的問題。
-4. [台股雙重資料源] 整合台灣奇摩股市 API 與台灣證交所官方 API，精準校正台股大盤與 ETF 最新收盤價。
+更新日誌 (V7.2):
+1. [100% 雲端試算表主導] 只要成功連上老爺的 Google 試算表，就 100% 依照試算表的增刪與順序顯示（刪除股票不再被強制補回）；僅在雲端斷線時才啟用保底清單。
+2. [消除週末假警報] 美股基準日計算強制排除 24 小時交易的加密貨幣 (BTC-USD)。
+3. [台股雙重資料源] 整合台灣奇摩股市 API 與台灣證交所官方 API，精準校正台股大盤與 ETF 最新收盤價。
 """
 
 import os
@@ -39,22 +38,18 @@ INDICES = [
     ("^SOX", "費半"),
 ]
 
-# V7.1 內建保底清單 (與老爺 Excel 20 檔順序完全一致，防止雲端 CSV 未同步漏股)
+# 斷線時的緊急備援清單 (平時以雲端試算表 100% 為主，不強制補回已刪除股票)
 DEFAULT_WATCHLIST = [
-    # 台股核心
     {"market": "台股", "code": "2330", "yf_symbol": "2330.TW", "name": "台積", "group": "核心"},
     {"market": "台股", "code": "2454", "yf_symbol": "2454.TW", "name": "聯發科", "group": "核心"},
     {"market": "台股", "code": "0050", "yf_symbol": "0050.TW", "name": "0050", "group": "核心"},
-    # 台股觀察
     {"market": "台股", "code": "0052", "yf_symbol": "0052.TW", "name": "富邦科技", "group": "觀察"},
     {"market": "台股", "code": "00919", "yf_symbol": "00919.TW", "name": "00919", "group": "觀察"},
     {"market": "台股", "code": "00929", "yf_symbol": "00929.TW", "name": "00929", "group": "觀察"},
     {"market": "台股", "code": "1303", "yf_symbol": "1303.TW", "name": "南亞", "group": "觀察"},
-    # 美股核心
     {"market": "美股", "code": "TSM", "yf_symbol": "TSM", "name": "台積電R", "group": "核心"},
     {"market": "美股", "code": "NVDA", "yf_symbol": "NVDA", "name": "輝達", "group": "核心"},
     {"market": "美股", "code": "TSLA", "yf_symbol": "TSLA", "name": "特斯拉", "group": "核心"},
-    # 美股觀察 (SPCX 在特斯拉下，微軟在 Alphabet 下)
     {"market": "美股", "code": "SPCX", "yf_symbol": "SPCX", "name": "SPCX", "group": "觀察"},
     {"market": "美股", "code": "INTC", "yf_symbol": "INTC", "name": "英特爾", "group": "觀察"},
     {"market": "美股", "code": "MRVL", "yf_symbol": "MRVL", "name": "邁威爾", "group": "觀察"},
@@ -70,7 +65,7 @@ DEFAULT_WATCHLIST = [
 MA_WINDOWS = [("MA10", 10), ("MA20", 20), ("MA60", 60), ("MA240", 240)]
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
-# 已綁定老爺最新發布的 Google 試算表 CSV 網址
+# 老爺最新發布的 Google 試算表 CSV 網址
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbBDIaVplXcSs4Mgn0evbStpMGv3EhI3234VczcBEwD3RuuxoHA8QV0q1ZrM5zzOcFWJ9UKmCuotYR/pub?gid=855107288&single=true&output=csv"
 
 HERE = Path(__file__).resolve().parent
@@ -85,7 +80,7 @@ HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
-# 工具函式與雲端清單讀取 (含內建保底自動合併)
+# 工具函式與雲端清單讀取 (100% 雲端試算表驅動)
 # ---------------------------------------------------------------------------
 
 def shorten_name(name):
@@ -102,6 +97,7 @@ def shorten_name(name):
 def load_watchlist():
     bust_url = f"{SHEET_CSV_URL}&_t={int(time.time())}"
     cloud_rows = []
+    seen = set()
     try:
         resp = requests.get(bust_url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
@@ -119,7 +115,7 @@ def load_watchlist():
             if market != "台股":
                 market = "美股"
 
-            # 修正 Excel 把 0050/00919/00929 開頭的 0 吃掉的問題 (例如變成 50, 919, 929)
+            # 自動補齊被 Excel 吃掉開頭 0 的台股 ETF 代號 (如 50 -> 0050, 919 -> 00919)
             if market == "台股" and code.isdigit() and len(code) in (2, 3):
                 code = code.zfill(4)
 
@@ -128,6 +124,10 @@ def load_watchlist():
             else:
                 if market == "美股":
                     yf_symbol = yf_symbol.replace(".", "-")
+
+            if yf_symbol in seen:
+                continue
+            seen.add(yf_symbol)
 
             original_name = (raw.get("name") or yf_symbol).strip()
             cloud_rows.append({
@@ -138,17 +138,11 @@ def load_watchlist():
                 "group": group
             })
     except Exception as e:
-        print(f"[提示] 讀取雲端試算表異常，改用內建保底清單: {e}", file=sys.stderr)
+        print(f"[提示] 讀取雲端試算表異常，啟用緊急保底清單: {e}", file=sys.stderr)
 
-    # 若雲端成功讀出完整清單，優先完全依照雲端試算表的順序與內容；若雲端漏掉保底股則自動補齊
+    # 只要雲端試算表有讀到資料，100% 依照試算表的增刪結果執行
     if cloud_rows:
-        final_rows = list(cloud_rows)
-        seen = {r["yf_symbol"] for r in final_rows}
-        for item in DEFAULT_WATCHLIST:
-            if item["yf_symbol"] not in seen:
-                final_rows.append(item.copy())
-                seen.add(item["yf_symbol"])
-        return final_rows
+        return cloud_rows
 
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
@@ -315,7 +309,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
         except Exception as e:
             print(f"[錯誤] 抓取或稽核 {sym} 失敗: {e}")
 
-    # --- V7.1 修正第三道防線：美股基準日排除 24 小時交易的加密貨幣 (-USD) ---
     def is_crypto(s):
         return "-USD" in s.upper()
 
@@ -722,7 +715,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V7.1 雙重保底與精準稽核版<br><br>
+        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V7.2 純雲端試算表驅動版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -794,8 +787,8 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary):
         
     for w in watch:
         sym = w["yf_symbol"]
-        if ("2330" in sym or "0050" in sym) and "正2" not in w["name"] and "反1" not in w["name"]:
-            if sym in seen_core:
+        if w["market"] == "台股" and (w["group"] == "核心" or "2330" in sym or "0050" in sym):
+            if "正2" in w["name"] or "反1" in w["name"] or sym in seen_core:
                 continue
             seen_core.add(sym)
             s = closes.get(sym)
