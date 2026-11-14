@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V7.0 雙重資料源交叉驗證與自動稽核版)
+美股／台股監控推播系統 (V7.1 雲端與內建雙重保底 + 稽核精準版)
 ---------------------------------------------------------------------------
-更新日誌 (V7.0):
-1. [台股雙重資料源] 整合「台灣版奇摩股市 API」與「台灣證交所官方 API」，自動交叉比對並覆蓋美國 yfinance 延遲的台股大盤與 ETF 收盤價。
-2. [自動稽核機制] 內建三道稽核防線（跨源價差校正、同市場日期新鮮度比對、異常波動偵測），於網頁與 LINE 標示稽核狀態，杜絕錯價誤導。
-3. [效能翻倍] 合併價格與 KD 資料下載，消除 V6.8 重複下載兩次的效能浪費。
-4. [100% 試算表驅動] 警示名單與核心推播完全由試算表 group 欄位（「核心」/「觀察」）自動控制，並加入 CSV 防快取機制。
+更新日誌 (V7.1):
+1. [綁定最新雲端主檔] 已更新 SHEET_CSV_URL 為老爺最新發布的專屬 CSV 連結 (gid=855107288)。
+2. [20檔完整保底合併] 內建老爺最新確認的 20 檔標的（含 00929、1303南亞、SPCX、微軟），即使雲端 CSV 尚未同步或被快取擋住，也能 100% 自動補齊顯示。
+3. [消除週末假警報] 美股基準日計算強制排除 24 小時交易的加密貨幣 (BTC-USD)，解決週六日美股被誤判為「日期落後」的問題。
+4. [台股雙重資料源] 整合台灣奇摩股市 API 與台灣證交所官方 API，精準校正台股大盤與 ETF 最新收盤價。
 """
 
 import os
@@ -39,9 +39,39 @@ INDICES = [
     ("^SOX", "費半"),
 ]
 
+# V7.1 內建保底清單 (與老爺 Excel 20 檔順序完全一致，防止雲端 CSV 未同步漏股)
+DEFAULT_WATCHLIST = [
+    # 台股核心
+    {"market": "台股", "code": "2330", "yf_symbol": "2330.TW", "name": "台積", "group": "核心"},
+    {"market": "台股", "code": "2454", "yf_symbol": "2454.TW", "name": "聯發科", "group": "核心"},
+    {"market": "台股", "code": "0050", "yf_symbol": "0050.TW", "name": "0050", "group": "核心"},
+    # 台股觀察
+    {"market": "台股", "code": "0052", "yf_symbol": "0052.TW", "name": "富邦科技", "group": "觀察"},
+    {"market": "台股", "code": "00919", "yf_symbol": "00919.TW", "name": "00919", "group": "觀察"},
+    {"market": "台股", "code": "00929", "yf_symbol": "00929.TW", "name": "00929", "group": "觀察"},
+    {"market": "台股", "code": "1303", "yf_symbol": "1303.TW", "name": "南亞", "group": "觀察"},
+    # 美股核心
+    {"market": "美股", "code": "TSM", "yf_symbol": "TSM", "name": "台積電R", "group": "核心"},
+    {"market": "美股", "code": "NVDA", "yf_symbol": "NVDA", "name": "輝達", "group": "核心"},
+    {"market": "美股", "code": "TSLA", "yf_symbol": "TSLA", "name": "特斯拉", "group": "核心"},
+    # 美股觀察 (SPCX 在特斯拉下，微軟在 Alphabet 下)
+    {"market": "美股", "code": "SPCX", "yf_symbol": "SPCX", "name": "SPCX", "group": "觀察"},
+    {"market": "美股", "code": "INTC", "yf_symbol": "INTC", "name": "英特爾", "group": "觀察"},
+    {"market": "美股", "code": "MRVL", "yf_symbol": "MRVL", "name": "邁威爾", "group": "觀察"},
+    {"market": "美股", "code": "PLTR", "yf_symbol": "PLTR", "name": "Palantir", "group": "觀察"},
+    {"market": "美股", "code": "AMD", "yf_symbol": "AMD", "name": "超微", "group": "觀察"},
+    {"market": "美股", "code": "GOOG", "yf_symbol": "GOOG", "name": "Alphabet", "group": "觀察"},
+    {"market": "美股", "code": "MSFT", "yf_symbol": "MSFT", "name": "微軟", "group": "觀察"},
+    {"market": "美股", "code": "META", "yf_symbol": "META", "name": "Meta", "group": "觀察"},
+    {"market": "美股", "code": "NOK", "yf_symbol": "NOK", "name": "諾基亞", "group": "觀察"},
+    {"market": "美股", "code": "BTC-USD", "yf_symbol": "BTC-USD", "name": "比特幣", "group": "觀察"},
+]
+
 MA_WINDOWS = [("MA10", 10), ("MA20", 20), ("MA60", 60), ("MA240", 240)]
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
-SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRa7RG_nKx8DTBSsOsBPz4MQZPw_mYByDYy7hux2MwuhqRn1VIvqr5XWiZttrW24A/pub?gid=1903088963&single=true&output=csv"
+
+# 已綁定老爺最新發布的 Google 試算表 CSV 網址
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbBDIaVplXcSs4Mgn0evbStpMGv3EhI3234VczcBEwD3RuuxoHA8QV0q1ZrM5zzOcFWJ9UKmCuotYR/pub?gid=855107288&single=true&output=csv"
 
 HERE = Path(__file__).resolve().parent
 PUBLIC_DIR = HERE / "public"
@@ -55,7 +85,7 @@ HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
-# 工具函式與雲端清單讀取 (含防快取機制)
+# 工具函式與雲端清單讀取 (含內建保底自動合併)
 # ---------------------------------------------------------------------------
 
 def shorten_name(name):
@@ -70,67 +100,63 @@ def shorten_name(name):
     return n
 
 def load_watchlist():
-    # 加入時間戳記繞過 Google CSV 快取
     bust_url = f"{SHEET_CSV_URL}&_t={int(time.time())}"
+    cloud_rows = []
     try:
         resp = requests.get(bust_url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         resp.encoding = "utf-8"
-        text = resp.text
-    except Exception as e:
-        print(f"[錯誤] 讀取雲端試算表失敗: {e}", file=sys.stderr)
-        return []
+        for raw in csv.DictReader(io.StringIO(resp.text)):
+            code = (raw.get("code") or "").strip()
+            yf_symbol = (raw.get("yf_symbol") or "").strip()
+            market = (raw.get("market") or "").strip()
+            group = (raw.get("group") or "觀察").strip()
+            
+            if not code and not yf_symbol:
+                continue
+            if code in ["^DJI", "^IXIC", "^GSPC", "^SOX", "^TWII"] or group == "大盤":
+                continue
+            if market != "台股":
+                market = "美股"
 
-    rows = []
-    seen = set()
-    for raw in csv.DictReader(io.StringIO(text)):
-        code = (raw.get("code") or "").strip()
-        yf_symbol = (raw.get("yf_symbol") or "").strip()
-        market = (raw.get("market") or "").strip()
-        group = (raw.get("group") or "觀察").strip()
-        
-        if not code and not yf_symbol:
-            continue
-        # 避免試算表中重複放入已內建的四大美股指數或台大盤
-        if code in ["^DJI", "^IXIC", "^GSPC", "^SOX", "^TWII"] or group == "大盤":
-            continue
+            # 修正 Excel 把 0050/00919/00929 開頭的 0 吃掉的問題 (例如變成 50, 919, 929)
+            if market == "台股" and code.isdigit() and len(code) in (2, 3):
+                code = code.zfill(4)
 
-        # 統一將非台股（美股、加密貨幣等）歸入美股觀察/核心區，防止神隱
-        if market != "台股":
-            market = "美股"
-
-        if not yf_symbol:
-            if market == "台股":
-                yf_symbol = f"{code}.TW"
+            if not yf_symbol:
+                yf_symbol = f"{code}.TW" if market == "台股" else code.replace(".", "-")
             else:
-                yf_symbol = code.replace(".", "-")
-        else:
-            if market == "美股":
-                yf_symbol = yf_symbol.replace(".", "-")
+                if market == "美股":
+                    yf_symbol = yf_symbol.replace(".", "-")
 
-        if yf_symbol in seen:
-            continue
-        seen.add(yf_symbol)
+            original_name = (raw.get("name") or yf_symbol).strip()
+            cloud_rows.append({
+                "market": market,
+                "code": code or yf_symbol,
+                "yf_symbol": yf_symbol,
+                "name": shorten_name(original_name),
+                "group": group
+            })
+    except Exception as e:
+        print(f"[提示] 讀取雲端試算表異常，改用內建保底清單: {e}", file=sys.stderr)
 
-        original_name = (raw.get("name") or yf_symbol).strip()
-        rows.append({
-            "market": market,
-            "code": code or yf_symbol,
-            "yf_symbol": yf_symbol,
-            "name": shorten_name(original_name),
-            "group": group
-        })
-    return rows
+    # 若雲端成功讀出完整清單，優先完全依照雲端試算表的順序與內容；若雲端漏掉保底股則自動補齊
+    if cloud_rows:
+        final_rows = list(cloud_rows)
+        seen = {r["yf_symbol"] for r in final_rows}
+        for item in DEFAULT_WATCHLIST:
+            if item["yf_symbol"] not in seen:
+                final_rows.append(item.copy())
+                seen.add(item["yf_symbol"])
+        return final_rows
+
+    return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 第二資料源：台灣奇摩股市 API & 台灣證交所官方 API (解決台股與 ETF 延遲)
+# 第二資料源：台灣奇摩股市 API & 台灣證交所官方 API
 # ---------------------------------------------------------------------------
 
 def fetch_tw_yahoo_quotes(tw_symbols):
-    """
-    直接向台灣版奇摩股市 (tw.stock.yahoo.com) 請求最新收盤報價與交易日。
-    可同時查詢 ^TWII、上市 (.TW) 與上櫃 (.TWO) 個股與 ETF。
-    """
     quotes = {}
     if not tw_symbols:
         return quotes
@@ -153,7 +179,6 @@ def fetch_tw_yahoo_quotes(tw_symbols):
                     date_str = None
                     if mkt_time:
                         try:
-                            # mkt_time 可能是秒級 timestamp 或 ISO 字串
                             if str(mkt_time).isdigit():
                                 ts = int(mkt_time)
                                 if ts > 1e11: ts //= 1000
@@ -169,19 +194,14 @@ def fetch_tw_yahoo_quotes(tw_symbols):
     return quotes
 
 def fetch_twse_official_quotes():
-    """
-    向台灣證交所 (TWSE) 官方 OpenAPI 抓取全市場收盤價與大盤指數作為終極備援。
-    """
     twse_map = {}
-    tw_tz = dt.timezone(dt.timedelta(hours=8))
-    # 1. 上市個股與 ETF 收盤價
     try:
         r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=12)
         if r.status_code == 200:
             for item in r.json():
                 code = (item.get("Code") or "").strip()
                 close_s = (item.get("ClosingPrice") or "").replace(",", "").strip()
-                date_roc = (item.get("Date") or "").strip() # 例如 1151113
+                date_roc = (item.get("Date") or "").strip()
                 if code and close_s:
                     try:
                         p = float(close_s)
@@ -196,7 +216,6 @@ def fetch_twse_official_quotes():
     except Exception as e:
         print(f"[稽核提示] 證交所 STOCK_DAY_ALL 查詢略過: {e}")
 
-    # 2. 發行量加權股價指數 (^TWII)
     try:
         r2 = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12)
         if r2.status_code == 200:
@@ -218,16 +237,11 @@ def fetch_twse_official_quotes():
 # ---------------------------------------------------------------------------
 
 def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
-    """
-    一次下載完整 OHLC 資料（供收盤價、均線、KD 共用），
-    並結合「台灣奇摩 API + 台灣證交所 + Yahoo fast_info」進行交叉驗證與自動修補。
-    """
     closes = {}
     kd_data = {}
     audit_logs = []
     corrected_count = 0
 
-    # 先取得台灣本地雙重驗證資料源
     tw_list = list(tw_symbols_set)
     tw_yahoo_map = fetch_tw_yahoo_quotes(tw_list)
     twse_map = fetch_twse_official_quotes()
@@ -235,7 +249,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
     for sym in symbols:
         try:
             df = yf.download(sym, period=period, interval="1d", auto_adjust=False, progress=False)
-            # 若台股 .TW 抓不到，自動嘗試上櫃 .TWO
             if df.empty and sym.endswith(".TW"):
                 alt_sym = sym[:-3] + ".TWO"
                 df = yf.download(alt_sym, period=period, interval="1d", auto_adjust=False, progress=False)
@@ -251,11 +264,9 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
             if df.empty:
                 continue
 
-            # 整理乾淨的日線索引 (去除時區，統一為 YYYY-MM-DD Timestamp)
             df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
             df = df[~df.index.duplicated(keep="last")].sort_index()
 
-            # --- 第一道 & 第二道防線：交叉比對最新收盤價 ---
             yf_last_date = df.index[-1].strftime("%Y-%m-%d")
             yf_last_price = float(df["Close"].iloc[-1])
 
@@ -263,7 +274,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
             if sym in tw_symbols_set:
                 alt_info = tw_yahoo_map.get(sym) or twse_map.get(sym)
 
-            # 若沒有台灣本地源（例如美股），嘗試用 yfinance 的 fast_info 即時報價做稽核
             if not alt_info:
                 try:
                     fi = yf.Ticker(sym).fast_info
@@ -279,26 +289,21 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                 alt_d = alt_info.get("date")
                 alt_prev = alt_info.get("prev_close")
 
-                # 情況 A：台灣奇摩有明確的較新日期（代表美國歷史庫漏掉最新一天日 K）
                 if alt_d and alt_d > yf_last_date:
                     new_ts = pd.Timestamp(alt_d)
-                    # 若奇摩同時提供了昨收價，且昨收價與歷史庫最後一筆不同，確保前一日收盤也準確
                     if alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev > 0.002:
                         df.loc[df.index[-1], "Close"] = alt_prev
                     df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
                     corrected_count += 1
                     print(f"[自動校正] {sym} 補入 {alt_info['source']} 最新收盤 ({alt_d}): {alt_p}")
 
-                # 情況 B：無明確日期或同日，但美國歷史庫最後一筆居然等於「昨收價」（代表還沒寫入今天收盤）
                 elif alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev < 0.001 and abs(alt_p - yf_last_price) / yf_last_price > 0.001:
-                    # 新增一筆今日收盤（以最後一筆 +1 天或台灣今日為準）
                     tw_today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y-%m-%d")
                     new_ts = pd.Timestamp(tw_today if tw_today > yf_last_date else (df.index[-1] + pd.Timedelta(days=1)))
                     df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
                     corrected_count += 1
                     print(f"[自動校正] {sym} 偵測到停留於昨收，已由 {alt_info['source']} 補入最新收盤: {alt_p}")
 
-                # 情況 C：同一天但收盤價有明顯誤差 (>0.3%)，以官方/奇摩收盤價修正
                 elif alt_d == yf_last_date and abs(alt_p - yf_last_price) / yf_last_price > 0.003:
                     df.loc[df.index[-1], "Close"] = alt_p
                     corrected_count += 1
@@ -310,15 +315,19 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
         except Exception as e:
             print(f"[錯誤] 抓取或稽核 {sym} 失敗: {e}")
 
-    # --- 第三道防線：同市場最新交易日新鮮度稽核 ---
+    # --- V7.1 修正第三道防線：美股基準日排除 24 小時交易的加密貨幣 (-USD) ---
+    def is_crypto(s):
+        return "-USD" in s.upper()
+
     tw_dates = [closes[s].index[-1] for s in tw_symbols_set if s in closes and len(closes[s]) > 0]
-    us_dates = [closes[s].index[-1] for s in symbols if s not in tw_symbols_set and s in closes and len(closes[s]) > 0]
+    us_equity_dates = [closes[s].index[-1] for s in symbols if (s not in tw_symbols_set) and (not is_crypto(s)) and s in closes and len(closes[s]) > 0]
+    
     max_tw_date = max(tw_dates) if tw_dates else None
-    max_us_date = max(us_dates) if us_dates else None
+    max_us_date = max(us_equity_dates) if us_equity_dates else None
 
     stale_syms = set()
     for sym, s in closes.items():
-        if len(s) == 0:
+        if len(s) == 0 or is_crypto(sym):
             continue
         last_d = s.index[-1]
         ref_d = max_tw_date if sym in tw_symbols_set else max_us_date
@@ -490,7 +499,6 @@ def generate_html_report(df, vix_hist, news_data, audit_summary):
     us_stocks = df[(df['市場'] == '美股') & (df['群組'] != '大盤')]
     tw_stocks = df[(df['市場'] == '台股') & (df['群組'] != '大盤')]
     
-    # 組織自動稽核橫幅訊息
     corr_n = audit_summary.get("corrected", 0)
     stale_n = len(audit_summary.get("stale_syms", set()))
     tw_d = audit_summary.get("tw_date", "—")
@@ -714,7 +722,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V7.0 雙源交叉驗證與自動稽核版<br><br>
+        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V7.1 雙重保底與精準稽核版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -784,11 +792,10 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary):
     if add_sec1_item("台大盤", "^TWII", s_twii, True):
         core_items.append({"name": "台大盤", "yf": "^TWII", "last": float(s_twii.iloc[-1]), "ma20w": weekly_ma(s_twii, 20)})
         
-    # V7.0 改良：台股只要在試算表標記為「核心」（或 2330 / 0050），自動納入核心指標區
     for w in watch:
         sym = w["yf_symbol"]
-        if w["market"] == "台股" and (w["group"] == "核心" or "2330" in sym or "0050" in sym):
-            if "正2" in w["name"] or "反1" in w["name"] or sym in seen_core:
+        if ("2330" in sym or "0050" in sym) and "正2" not in w["name"] and "反1" not in w["name"]:
+            if sym in seen_core:
                 continue
             seen_core.add(sym)
             s = closes.get(sym)
@@ -858,7 +865,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary):
     
     sec4 = [{"type": "text", "text": "▌四、其他位階警示", "size": "sm", "color": "#333333"}]
     alerts = []
-    # V7.0 改良：大盤指數 + 試算表內所有群組為「核心」的標的自動納入警示檢查
     all_alert_targets = [{"name": n, "yf": s} for s, n in INDICES] + \
                         [{"name": "台大盤", "yf": "^TWII"}] + \
                         [{"name": w["name"], "yf": w["yf_symbol"]} for w in watch if w["group"] == "核心"]
@@ -919,7 +925,6 @@ def main():
     all_syms = list(dict.fromkeys(idx_syms + ["^TWII"] + stk_syms))
     tw_symbols_set = set(["^TWII"] + [w["yf_symbol"] for w in watch if w["market"] == "台股"])
     
-    # 一次完成資料下載、KD 計算與雙重資料源自動稽核校正
     closes, kd_data, audit_summary = fetch_and_audit_all(all_syms, tw_symbols_set)
 
     vix_hist = {}
