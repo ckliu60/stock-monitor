@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V8.2 清爽字體版)
+美股／台股監控推播系統 (V8.3 大盤短線燈號＋視覺減壓版)
 ---------------------------------------------------------------------------
-更新日誌 (V8.2):
-1. [視覺減壓] 移除 LINE 圖卡與 HTML 網頁報表中「四、其他位階警示」的所有粗體設定，改為清爽一般字體。
-2. [長短線雙燈號架構] 完美對接試算表新增的 5MA, 10MA 與短線燈號欄位。
+更新日誌 (V8.3):
+1. [大盤短線燈號] 於「大盤與 VIX 狀況」表格新增「短線燈號」與「5MA/10MA」欄位，與個股表完全對齊。
+2. [極致輕盈字體] 「四、其他位階警示」強制鎖定 font-weight: 400 細字體與 13px，徹底消除視覺沉重感。
 3. [自訂警示顏色] 網頁與 LINE 圖卡同步：跌破季線標綠色 🟢，跌破年線標紅色 🔴。
 """
 
@@ -588,6 +588,10 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
 .btn-download {{ background:#1b8e3a; color:#fff; width: 100%; max-width: 300px; }}
 
+/* 專為「四、其他位階警示」打造的輕盈細字體樣式 */
+ol.alert-list {{ line-height:1.8; font-size:13px; font-weight:400 !important; padding-left:24px; margin-bottom:24px; color:#333; }}
+ol.alert-list li, ol.alert-list span {{ font-weight:400 !important; }}
+
 .freeze-single {{
     position: -webkit-sticky; position: sticky; left: 0; z-index: 2;
     background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2);
@@ -617,17 +621,20 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 <h2>大盤與 VIX 狀況 (+/- 2%)</h2>
 <div class='table-container'><table>
 <thead><tr>
-    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>長線燈號</th><th class='num'>資料日期</th>
+    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>資料日期</th>
 </tr></thead><tbody>
 """
     
     for _, row in idx_df.iterrows():
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
-        ma20, ma60, ma240, ma20w = row['MA20'], row['MA60'], row['MA240'], row['MA20週']
+        ma5, ma10, ma20, ma60, ma240, ma20w = row['MA5'], row['MA10'], row['MA20'], row['MA60'], row['MA240'], row['MA20週']
         kd_d, kd_w, kd_m = row['日K'], row['週K'], row['月K']
         
         pos = get_position(last, ma20, ma60, ma240)
         weather = get_weather_icon(pct_val, 2.0)
+        short_status_text = get_short_term_status(last, ma5, ma10)
+        short_badge = get_short_badge(short_status_text)
+        ma5_10_str = f"{ma5:,.0f} / {ma10:,.0f}" if pd.notna(ma5) and pd.notna(ma10) else "—"
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         bg_cls = "tw-row" if row['市場'] == '台股' else ""
         d_tag = row['資料日期'][5:] + ("⚠️" if "⚠️" in row['稽核狀態'] else "")
@@ -636,27 +643,29 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         html += f"<td class='num'>{last:,.0f}</td>"
         html += fmt_net(net, is_idx=True)
         html += fmt_pct_td(pct_val)
-        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num mute'>{d_tag}</td></tr>"
+        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{status}</td><td class='num mute'>{d_tag}</td></tr>"
 
     for v_name, v_sym in [("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")]:
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
-            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td><td class='num mute'>—</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td><td class='num mute'>—</td></tr>"
         else:
             status = "<span class='badge b-down'>🟢 安全</span>" if val < 35 else "<span class='badge b-up'>🔴 恐慌</span>"
-            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td><td class='num mute'>—</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td><td class='num mute'>—</td></tr>"
             
     html += "</tbody></table></div>"
     
     html += "<h2>個股追蹤清單 (支援短線/長線雙燈號)</h2><div class='table-container'><table><thead><tr>"
-    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>短線燈號</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th><th class='num'>資料日期</th></tr></thead><tbody>"
+    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th><th class='num'>資料日期</th></tr></thead><tbody>"
 
     def render_stock_row(row, idx):
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
         ma5, ma10, ma20, ma60, ma240, ma20w = row['MA5'], row['MA10'], row['MA20'], row['MA60'], row['MA240'], row['MA20週']
         kd_d, kd_w, kd_m = row['日K'], row['週K'], row['月K']
         
+        pos = get_position(last, ma20, ma60, ma240)
+        weather = get_weather_icon(pct_val, 5.0)
         long_status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         short_status_text = get_short_term_status(last, ma5, ma10)
         short_badge = get_short_badge(short_status_text)
@@ -673,25 +682,25 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         
         res = f"<tr class='{bg_cls}'><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
         res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
-        res += f"<td class='num'>{short_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{long_status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td><td class='num mute'>{d_tag}</td></tr>"
+        res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{long_status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td><td class='num mute'>{d_tag}</td></tr>"
         return res
 
-    html += "<tr class='grp'><td colspan='12'>美股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='14'>美股觀察區</td></tr>"
     idx = 1
     for _, row in us_stocks.iterrows():
         html += render_stock_row(row, idx)
         idx += 1
         
-    html += "<tr class='grp'><td colspan='12'>台股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='14'>台股觀察區</td></tr>"
     for _, row in tw_stocks.iterrows():
         html += render_stock_row(row, idx)
         idx += 1
         
     html += "</tbody></table></div>"
 
-    # ================= 專屬短線與位階警示區塊 (已移除粗體) =================
+    # ================= 專屬短線與位階警示區塊 (強制細字體 400 不加粗) =================
     html += "<h2>四、其他位階警示</h2>"
-    html += "<ol style='line-height:1.8; font-size:14px; padding-left:24px; margin-bottom:24px;'>"
+    html += "<ol class='alert-list'>"
     
     alert_df = df[df['長線燈號'].isin(['大盤', '核心'])]
     
@@ -702,13 +711,13 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         ma240 = r['MA240']
         
         drop = []
-        # 跌破季線標綠色 🟢，跌破年線標紅色 🔴 (一般字體，不加粗)
-        if pd.notna(ma60) and last < ma60: drop.append("<span style='color:#1b8e3a;'>🟢[跌]破季線</span>")
-        if pd.notna(ma240) and last < ma240: drop.append("<span style='color:#d32f2f;'>🔴[跌]破年線</span>")
+        # 跌破季線標綠色 🟢，跌破年線標紅色 🔴 (強制 font-weight:400 細字體)
+        if pd.notna(ma60) and last < ma60: drop.append("<span style='color:#1b8e3a; font-weight:400;'>🟢[跌]破季線</span>")
+        if pd.notna(ma240) and last < ma240: drop.append("<span style='color:#d32f2f; font-weight:400;'>🔴[跌]破年線</span>")
         
         w_ret, m_ret = r['週%'], r['月%']
         if (pd.notna(w_ret) and w_ret <= -20) or (pd.notna(m_ret) and m_ret <= -20): 
-            drop.append("<span style='color:#1b8e3a;'>🟢週/月跌>20%</span>")
+            drop.append("<span style='color:#1b8e3a; font-weight:400;'>🟢週/月跌>20%</span>")
             
         ko80 = []
         if pd.notna(r['日K']) and r['日K'] > 80: ko80.append("日")
@@ -716,21 +725,21 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         if pd.notna(r['月K']) and r['月K'] > 80: ko80.append("月")
         
         if drop or ko80:
-            li_html = f"<li>{r['名稱']}: "
+            li_html = f"<li style='font-weight:400;'>{r['名稱']}: "
             if drop: li_html += " ".join(drop) + " "
-            if ko80: li_html += f"<span style='color:#d32f2f;'>🔴[熱]{'/'.join(ko80)}K>80</span>"
+            if ko80: li_html += f"<span style='color:#d32f2f; font-weight:400;'>🔴[熱]{'/'.join(ko80)}K>80</span>"
             li_html += "</li>"
             html += li_html
             alert_count_html += 1
             
     if alert_count_html == 0:
-        html += "<li>*(今日無觸發任何位階警示)*</li>"
+        html += "<li style='font-weight:400;'>*(今日無觸發任何位階警示)*</li>"
         
     html += "</ol>"
 
     # ================= 市場新聞區塊 =================
     html += "<h2>市場新聞 ( Yahoo 財經 )</h2>"
-    html += "<ol style='line-height:1.8; font-size:14px; padding-left:24px; margin-bottom:24px;'>"
+    html += "<ol style='line-height:1.8; font-size:13px; padding-left:24px; margin-bottom:24px;'>"
     for item in news_data:
         html += f"<li><a href='{item['link']}' target='_blank' style='font-weight:normal;'>{item['title']}</a></li>"
     html += "</ol>"
@@ -766,7 +775,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.2 清爽字體版<br><br>
+        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.3 大盤短線燈號＋視覺減壓版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -916,7 +925,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     contents.extend(sec3)
     contents.append({"type": "separator", "margin": "md"})
     
-    # ================= 四、其他位階警示 (已移除粗體) =================
+    # ================= 四、其他位階警示 (強制不加粗 weight: regular) =================
     sec4 = [{"type": "text", "text": "▌四、其他位階警示", "size": "sm", "color": "#333333"}]
     alerts = []
     alert_df = df_report[df_report['長線燈號'].isin(['大盤', '核心'])]
@@ -937,17 +946,16 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
         if pd.notna(r['月K']) and r['月K'] > 80: ko80.append("月")
         
         if drop_q or drop_y or drop_20 or ko80:
-            spans = [{"type": "span", "text": f"{alert_count}. {r['名稱']}: "}]
-            # 跌破季線標綠色 🟢，跌破年線標紅色 🔴 (一般字體，不加粗)
+            spans = [{"type": "span", "text": f"{alert_count}. {r['名稱']}: ", "weight": "regular"}]
             if drop_q:
-                spans.append({"type": "span", "text": "🟢[跌]破季線 ", "color": C_DOWN})
+                spans.append({"type": "span", "text": "🟢[跌]破季線 ", "color": C_DOWN, "weight": "regular"})
             if drop_y:
-                spans.append({"type": "span", "text": "🔴[跌]破年線 ", "color": C_UP})
+                spans.append({"type": "span", "text": "🔴[跌]破年線 ", "color": C_UP, "weight": "regular"})
             if drop_20:
-                spans.append({"type": "span", "text": "🟢週/月跌>20% ", "color": C_DOWN})
+                spans.append({"type": "span", "text": "🟢週/月跌>20% ", "color": C_DOWN, "weight": "regular"})
             if ko80:
-                spans.append({"type": "span", "text": f"🔴[熱]{'/'.join(ko80)}K>80", "color": C_UP})
-            alerts.append({"type": "text", "size": "sm", "wrap": True, "contents": spans})
+                spans.append({"type": "span", "text": f"🔴[熱]{'/'.join(ko80)}K>80", "color": C_UP, "weight": "regular"})
+            alerts.append({"type": "text", "size": "sm", "weight": "regular", "wrap": True, "contents": spans})
             alert_count += 1
             
     if alerts: sec4.extend(alerts)
