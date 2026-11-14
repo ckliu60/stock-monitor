@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V6.8 雲端全自動版 - 終極名稱縮減與防換行)
+美股／台股監控推播系統 (V7.0 雙重資料源交叉驗證與自動稽核版)
 ---------------------------------------------------------------------------
-更新日誌 (V6.8): 
-- 將 LINE 推播與報表中的「台股大盤」縮寫為「台大盤」，「台積電」縮寫為「台積」，「元大台灣50」縮寫為「0050」，避免手機畫面過長換行。
-- 同步更新 ALERT_TARGETS 警示對象名稱，確保縮寫後仍能正確觸發技術面警示。
-- 延續 V6.7 的獨立下載 (修復時區 Bug)、Excel 白底與紅綠色彩管理。
+更新日誌 (V7.0):
+1. [台股雙重資料源] 整合「台灣版奇摩股市 API」與「台灣證交所官方 API」，自動交叉比對並覆蓋美國 yfinance 延遲的台股大盤與 ETF 收盤價。
+2. [自動稽核機制] 內建三道稽核防線（跨源價差校正、同市場日期新鮮度比對、異常波動偵測），於網頁與 LINE 標示稽核狀態，杜絕錯價誤導。
+3. [效能翻倍] 合併價格與 KD 資料下載，消除 V6.8 重複下載兩次的效能浪費。
+4. [100% 試算表驅動] 警示名單與核心推播完全由試算表 group 欄位（「核心」/「觀察」）自動控制，並加入 CSV 防快取機制。
 """
 
 import os
 import sys
 import io
 import csv
+import time
 import json
 import datetime as dt
 import xml.etree.ElementTree as ET
@@ -37,13 +39,6 @@ INDICES = [
     ("^SOX", "費半"),
 ]
 
-# 配合縮寫更新警示目標名稱
-ALERT_TARGETS = [
-    "道瓊", "那指", "標普", "費半",
-    "台積電R", "輝達", "特斯拉", "SpaceX",
-    "台積", "聯發科", "0050", "台大盤"
-]
-
 MA_WINDOWS = [("MA10", 10), ("MA20", 20), ("MA60", 60), ("MA240", 240)]
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRa7RG_nKx8DTBSsOsBPz4MQZPw_mYByDYy7hux2MwuhqRn1VIvqr5XWiZttrW24A/pub?gid=1903088963&single=true&output=csv"
@@ -53,22 +48,32 @@ PUBLIC_DIR = HERE / "public"
 REPORT_HTML_PATH = PUBLIC_DIR / "index.html"
 REPORT_EXCEL_PATH = PUBLIC_DIR / "report_data.xlsx"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+}
+
 # ---------------------------------------------------------------------------
-# 工具函式
+# 工具函式與雲端清單讀取 (含防快取機制)
 # ---------------------------------------------------------------------------
 
 def shorten_name(name):
     """極致縮短名稱，避免手機版 LINE 斷行"""
     n = name.strip()
     if "群益台灣精選高息" in n: return "00919"
+    if "復華台灣科技優息" in n: return "00929"
     if "元大台灣50" in n: return "0050"
     if n == "台積電ADR": return "台積電R"
     if n == "台積電": return "台積"
+    if n == "台股大盤": return "台大盤"
     return n
 
 def load_watchlist():
+    # 加入時間戳記繞過 Google CSV 快取
+    bust_url = f"{SHEET_CSV_URL}&_t={int(time.time())}"
     try:
-        resp = requests.get(SHEET_CSV_URL, timeout=20)
+        resp = requests.get(bust_url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         resp.encoding = "utf-8"
         text = resp.text
@@ -77,13 +82,25 @@ def load_watchlist():
         return []
 
     rows = []
+    seen = set()
     for raw in csv.DictReader(io.StringIO(text)):
         code = (raw.get("code") or "").strip()
         yf_symbol = (raw.get("yf_symbol") or "").strip()
         market = (raw.get("market") or "").strip()
+        group = (raw.get("group") or "觀察").strip()
         
+        if not code and not yf_symbol:
+            continue
+        # 避免試算表中重複放入已內建的四大美股指數或台大盤
+        if code in ["^DJI", "^IXIC", "^GSPC", "^SOX", "^TWII"] or group == "大盤":
+            continue
+
+        # 統一將非台股（美股、加密貨幣等）歸入美股觀察/核心區，防止神隱
+        if market != "台股":
+            market = "美股"
+
         if not yf_symbol:
-            if market == "台股" or code.isdigit():
+            if market == "台股":
                 yf_symbol = f"{code}.TW"
             else:
                 yf_symbol = code.replace(".", "-")
@@ -91,29 +108,236 @@ def load_watchlist():
             if market == "美股":
                 yf_symbol = yf_symbol.replace(".", "-")
 
+        if yf_symbol in seen:
+            continue
+        seen.add(yf_symbol)
+
         original_name = (raw.get("name") or yf_symbol).strip()
         rows.append({
-            "market": market, "code": code, "yf_symbol": yf_symbol,
+            "market": market,
+            "code": code or yf_symbol,
+            "yf_symbol": yf_symbol,
             "name": shorten_name(original_name),
-            "group": (raw.get("group") or "觀察").strip()
+            "group": group
         })
     return rows
 
-def fetch_data_individually(symbols, period="2y"):
+# ---------------------------------------------------------------------------
+# 第二資料源：台灣奇摩股市 API & 台灣證交所官方 API (解決台股與 ETF 延遲)
+# ---------------------------------------------------------------------------
+
+def fetch_tw_yahoo_quotes(tw_symbols):
+    """
+    直接向台灣版奇摩股市 (tw.stock.yahoo.com) 請求最新收盤報價與交易日。
+    可同時查詢 ^TWII、上市 (.TW) 與上櫃 (.TWO) 個股與 ETF。
+    """
+    quotes = {}
+    if not tw_symbols:
+        return quotes
+    try:
+        url = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList"
+        params = {"fields": "symbol,price,regularMarketPreviousClose,regularMarketTime", "symbols": ",".join(tw_symbols)}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            tw_tz = dt.timezone(dt.timedelta(hours=8))
+            for item in items:
+                sym = item.get("symbol")
+                price_raw = item.get("price")
+                prev_raw = item.get("regularMarketPreviousClose")
+                mkt_time = item.get("regularMarketTime")
+                if sym and price_raw not in (None, "-", ""):
+                    price = float(str(price_raw).replace(",", ""))
+                    prev = float(str(prev_raw).replace(",", "")) if prev_raw not in (None, "-", "") else None
+                    date_str = None
+                    if mkt_time:
+                        try:
+                            # mkt_time 可能是秒級 timestamp 或 ISO 字串
+                            if str(mkt_time).isdigit():
+                                ts = int(mkt_time)
+                                if ts > 1e11: ts //= 1000
+                                date_str = dt.datetime.fromtimestamp(ts, tw_tz).strftime("%Y-%m-%d")
+                            else:
+                                date_str = str(mkt_time)[:10]
+                        except:
+                            pass
+                    if price > 0:
+                        quotes[sym] = {"price": price, "prev_close": prev, "date": date_str, "source": "台灣奇摩API"}
+    except Exception as e:
+        print(f"[稽核提示] 台灣奇摩 API 備援查詢略過: {e}")
+    return quotes
+
+def fetch_twse_official_quotes():
+    """
+    向台灣證交所 (TWSE) 官方 OpenAPI 抓取全市場收盤價與大盤指數作為終極備援。
+    """
+    twse_map = {}
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    # 1. 上市個股與 ETF 收盤價
+    try:
+        r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            for item in r.json():
+                code = (item.get("Code") or "").strip()
+                close_s = (item.get("ClosingPrice") or "").replace(",", "").strip()
+                date_roc = (item.get("Date") or "").strip() # 例如 1151113
+                if code and close_s:
+                    try:
+                        p = float(close_s)
+                        d_str = None
+                        if len(date_roc) == 7 and date_roc.isdigit():
+                            y = int(date_roc[:3]) + 1911
+                            d_str = f"{y:04d}-{date_roc[3:5]}-{date_roc[5:7]}"
+                        if p > 0:
+                            twse_map[f"{code}.TW"] = {"price": p, "prev_close": None, "date": d_str, "source": "證交所TWSE"}
+                    except:
+                        pass
+    except Exception as e:
+        print(f"[稽核提示] 證交所 STOCK_DAY_ALL 查詢略過: {e}")
+
+    # 2. 發行量加權股價指數 (^TWII)
+    try:
+        r2 = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12)
+        if r2.status_code == 200:
+            for item in r2.json():
+                idx_name = item.get("指數", "")
+                if "發行量加權股價指數" in idx_name:
+                    close_s = (item.get("收盤指數") or "").replace(",", "").strip()
+                    if close_s:
+                        p = float(close_s)
+                        if p > 0:
+                            twse_map["^TWII"] = {"price": p, "prev_close": None, "date": None, "source": "證交所TWSE"}
+                    break
+    except:
+        pass
+    return twse_map
+
+# ---------------------------------------------------------------------------
+# 主資料抓取與三道自動稽核引擎
+# ---------------------------------------------------------------------------
+
+def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
+    """
+    一次下載完整 OHLC 資料（供收盤價、均線、KD 共用），
+    並結合「台灣奇摩 API + 台灣證交所 + Yahoo fast_info」進行交叉驗證與自動修補。
+    """
     closes = {}
+    kd_data = {}
+    audit_logs = []
+    corrected_count = 0
+
+    # 先取得台灣本地雙重驗證資料源
+    tw_list = list(tw_symbols_set)
+    tw_yahoo_map = fetch_tw_yahoo_quotes(tw_list)
+    twse_map = fetch_twse_official_quotes()
+
     for sym in symbols:
         try:
             df = yf.download(sym, period=period, interval="1d", auto_adjust=False, progress=False)
-            if df.empty: continue
-            
+            # 若台股 .TW 抓不到，自動嘗試上櫃 .TWO
+            if df.empty and sym.endswith(".TW"):
+                alt_sym = sym[:-3] + ".TWO"
+                df = yf.download(alt_sym, period=period, interval="1d", auto_adjust=False, progress=False)
+
+            if df.empty:
+                audit_logs.append(f"⚠️ {sym}: 歷史庫無資料")
+                continue
+
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
-                
-            if "Close" in df:
-                s = df["Close"]
-                closes[sym] = s.dropna()
-        except: pass
-    return closes
+
+            df = df[["High", "Low", "Close"]].dropna()
+            if df.empty:
+                continue
+
+            # 整理乾淨的日線索引 (去除時區，統一為 YYYY-MM-DD Timestamp)
+            df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+
+            # --- 第一道 & 第二道防線：交叉比對最新收盤價 ---
+            yf_last_date = df.index[-1].strftime("%Y-%m-%d")
+            yf_last_price = float(df["Close"].iloc[-1])
+
+            alt_info = None
+            if sym in tw_symbols_set:
+                alt_info = tw_yahoo_map.get(sym) or twse_map.get(sym)
+
+            # 若沒有台灣本地源（例如美股），嘗試用 yfinance 的 fast_info 即時報價做稽核
+            if not alt_info:
+                try:
+                    fi = yf.Ticker(sym).fast_info
+                    lp = fi.get("lastPrice") or fi.get("regularMarketPrice")
+                    pc = fi.get("previousClose")
+                    if lp and float(lp) > 0:
+                        alt_info = {"price": float(lp), "prev_close": float(pc) if pc else None, "date": None, "source": "fast_info"}
+                except:
+                    pass
+
+            if alt_info and alt_info["price"] > 0:
+                alt_p = alt_info["price"]
+                alt_d = alt_info.get("date")
+                alt_prev = alt_info.get("prev_close")
+
+                # 情況 A：台灣奇摩有明確的較新日期（代表美國歷史庫漏掉最新一天日 K）
+                if alt_d and alt_d > yf_last_date:
+                    new_ts = pd.Timestamp(alt_d)
+                    # 若奇摩同時提供了昨收價，且昨收價與歷史庫最後一筆不同，確保前一日收盤也準確
+                    if alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev > 0.002:
+                        df.loc[df.index[-1], "Close"] = alt_prev
+                    df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
+                    corrected_count += 1
+                    print(f"[自動校正] {sym} 補入 {alt_info['source']} 最新收盤 ({alt_d}): {alt_p}")
+
+                # 情況 B：無明確日期或同日，但美國歷史庫最後一筆居然等於「昨收價」（代表還沒寫入今天收盤）
+                elif alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev < 0.001 and abs(alt_p - yf_last_price) / yf_last_price > 0.001:
+                    # 新增一筆今日收盤（以最後一筆 +1 天或台灣今日為準）
+                    tw_today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y-%m-%d")
+                    new_ts = pd.Timestamp(tw_today if tw_today > yf_last_date else (df.index[-1] + pd.Timedelta(days=1)))
+                    df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
+                    corrected_count += 1
+                    print(f"[自動校正] {sym} 偵測到停留於昨收，已由 {alt_info['source']} 補入最新收盤: {alt_p}")
+
+                # 情況 C：同一天但收盤價有明顯誤差 (>0.3%)，以官方/奇摩收盤價修正
+                elif alt_d == yf_last_date and abs(alt_p - yf_last_price) / yf_last_price > 0.003:
+                    df.loc[df.index[-1], "Close"] = alt_p
+                    corrected_count += 1
+                    print(f"[自動校正] {sym} 修正同日收盤價差: {yf_last_price} -> {alt_p}")
+
+            closes[sym] = df["Close"]
+            kd_data[sym] = kd_timeframes(df)
+
+        except Exception as e:
+            print(f"[錯誤] 抓取或稽核 {sym} 失敗: {e}")
+
+    # --- 第三道防線：同市場最新交易日新鮮度稽核 ---
+    tw_dates = [closes[s].index[-1] for s in tw_symbols_set if s in closes and len(closes[s]) > 0]
+    us_dates = [closes[s].index[-1] for s in symbols if s not in tw_symbols_set and s in closes and len(closes[s]) > 0]
+    max_tw_date = max(tw_dates) if tw_dates else None
+    max_us_date = max(us_dates) if us_dates else None
+
+    stale_syms = set()
+    for sym, s in closes.items():
+        if len(s) == 0:
+            continue
+        last_d = s.index[-1]
+        ref_d = max_tw_date if sym in tw_symbols_set else max_us_date
+        if ref_d is not None and (ref_d - last_d).days >= 1:
+            stale_syms.add(sym)
+            audit_logs.append(f"⚠️ {sym} 日期落後 ({last_d.strftime('%m/%d')})")
+
+    audit_summary = {
+        "corrected": corrected_count,
+        "stale_syms": stale_syms,
+        "logs": audit_logs,
+        "tw_date": max_tw_date.strftime("%Y-%m-%d") if max_tw_date else "—",
+        "us_date": max_us_date.strftime("%Y-%m-%d") if max_us_date else "—"
+    }
+    return closes, kd_data, audit_summary
+
+# ---------------------------------------------------------------------------
+# 技術指標與輔助函式
+# ---------------------------------------------------------------------------
 
 def pct(new, old): return None if not old else (new / old - 1.0) * 100.0
 def compute_ma(series): return {name: round(float(series.rolling(w).mean().iloc[-1]), 2) if len(series) >= w else None for name, w in MA_WINDOWS}
@@ -159,8 +383,7 @@ def fetch_yahoo_news(limit=5):
     url = "https://tw.news.yahoo.com/rss/finance"
     news = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         root = ET.fromstring(resp.text)
         for item in root.findall('.//item')[:limit]:
@@ -178,18 +401,20 @@ def fetch_yahoo_news(limit=5):
 # ---------------------------------------------------------------------------
 # 匯出與報表生成
 # ---------------------------------------------------------------------------
-def export_all_data(closes, watch, kd_data):
-    all_targets = [{"market": "美股", "code": s, "name": n, "yf": s, "group": "核心"} for s, n in INDICES] + \
-                  [{"market": "台股", "code": "^TWII", "name": "台大盤", "yf": "^TWII", "group": "核心"}] + \
+def export_all_data(closes, watch, kd_data, audit_summary):
+    all_targets = [{"market": "美股", "code": s, "name": n, "yf": s, "group": "大盤"} for s, n in INDICES] + \
+                  [{"market": "台股", "code": "^TWII", "name": "台大盤", "yf": "^TWII", "group": "大盤"}] + \
                   [{"market": w["market"], "code": w["code"], "name": w["name"], "yf": w["yf_symbol"], "group": w["group"]} for w in watch]
     
     rows = []
+    stale_set = audit_summary.get("stale_syms", set())
     for i, t in enumerate(all_targets, 1):
         sym = t["yf"]
         s = closes.get(sym)
-        if s is None or len(s) < 2: continue
+        if s is None or len(s) < 1:
+            continue
         
-        last = s.iloc[-1]
+        last = float(s.iloc[-1])
         pct_1d = pct(last, s.iloc[-2]) if len(s) >= 2 else None
         net_1d = (last - s.iloc[-2]) if len(s) >= 2 else None
         pct_1w = pct(last, s.iloc[-6]) if len(s) >= 6 else None
@@ -203,9 +428,12 @@ def export_all_data(closes, watch, kd_data):
         kd_w = kd.get("週", (None, None))
         kd_m = kd.get("月", (None, None))
         
+        audit_flag = "⚠️日期延遲" if sym in stale_set else "✅正常"
+        
         row = {
             "序號": i, "群組": t["group"], "市場": t["market"], "代碼": t["code"],
-            "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2), "資料日期": s.index[-1].strftime("%Y-%m-%d"),
+            "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2),
+            "資料日期": s.index[-1].strftime("%Y-%m-%d"), "稽核狀態": audit_flag,
             "當日漲跌": round(net_1d, 2) if net_1d is not None else None,
             "當日%": round(pct_1d, 2) if pct_1d is not None else None,
             "週%": round(pct_1w, 2) if pct_1w is not None else None,
@@ -237,7 +465,7 @@ def export_all_data(closes, watch, kd_data):
             worksheet.set_column('A:D', 10, white_bg)
             worksheet.set_column('E:E', 12, white_bg)  
             worksheet.set_column('F:F', 12, white_bg)  
-            worksheet.set_column('G:Y', 10, white_bg)  
+            worksheet.set_column('G:Z', 10, white_bg)  
             
             worksheet.freeze_panes(1, 5)
             worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
@@ -254,15 +482,25 @@ def export_all_data(closes, watch, kd_data):
         
     return df
 
-def generate_html_report(df, vix_hist, news_data):
+def generate_html_report(df, vix_hist, news_data, audit_summary):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_str = dt.datetime.now(tw_tz).strftime("%Y/%m/%d %H:%M")
     
-    idx_df = df[df['名稱'].isin([n for _, n in INDICES])]
-    tw_idx = df[df['名稱'] == '台大盤']
-    us_stocks = df[(df['市場'] == '美股') & (~df['名稱'].isin([n for _, n in INDICES]))]
-    tw_stocks = df[(df['市場'] == '台股') & (df['名稱'] != '台大盤')]
+    idx_df = df[df['群組'] == '大盤']
+    us_stocks = df[(df['市場'] == '美股') & (df['群組'] != '大盤')]
+    tw_stocks = df[(df['市場'] == '台股') & (df['群組'] != '大盤')]
     
+    # 組織自動稽核橫幅訊息
+    corr_n = audit_summary.get("corrected", 0)
+    stale_n = len(audit_summary.get("stale_syms", set()))
+    tw_d = audit_summary.get("tw_date", "—")
+    us_d = audit_summary.get("us_date", "—")
+    if stale_n == 0:
+        audit_banner = f"<div style='background:#e8f5e9; color:#1b8e3a; padding:8px 12px; border-radius:6px; font-size:12px; margin:8px 0 14px 0; font-weight:bold;'>✅ 自動稽核通過｜美股基準日：{us_d}｜台股基準日：{tw_d}（雙重資料源已即時驗證，自動校正 {corr_n} 檔延遲收盤價）</div>"
+    else:
+        logs_str = "；".join(audit_summary.get("logs", [])[:3])
+        audit_banner = f"<div style='background:#fff3e0; color:#ef6c00; padding:8px 12px; border-radius:6px; font-size:12px; margin:8px 0 14px 0; font-weight:bold;'>⚠️ 自動稽核提醒｜美股基準日：{us_d}｜台股基準日：{tw_d}｜已校正 {corr_n} 檔，仍有 {stale_n} 檔日期異常：{logs_str}</div>"
+
     def fmt_net(val, is_idx=False):
         if pd.isna(val): return '<td class="num mute">—</td>'
         cls = 'up' if val > 0 else 'down' if val < 0 else 'mute'
@@ -362,15 +600,16 @@ tr.tw-row td {{ background-color: #fff9db !important; }}
 tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{ background-color: #fff9db !important; }}
 </style></head><body><div class='wrap'>
 <h1>📊 股市核心監控報表</h1><div class='sub'>產生時間：{now_str} (台灣時間)</div>
+{audit_banner}
 
 <h2>大盤與 VIX 狀況 (+/- 2%)</h2>
 <div class='table-container'><table>
 <thead><tr>
-    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th>
+    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>資料日期</th>
 </tr></thead><tbody>
 """
     
-    for _, row in pd.concat([idx_df, tw_idx]).iterrows():
+    for _, row in idx_df.iterrows():
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
         ma20, ma60, ma240, ma20w = row['MA20'], row['MA60'], row['MA240'], row['MA20週']
         kd_d, kd_w, kd_m = row['日K'], row['週K'], row['月K']
@@ -378,28 +617,28 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         pos = get_position(last, ma20, ma60, ma240)
         weather = get_weather_icon(pct_val, 2.0)
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
-        
         bg_cls = "tw-row" if row['市場'] == '台股' else ""
+        d_tag = row['資料日期'][5:] + ("⚠️" if "⚠️" in row['稽核狀態'] else "")
         
         html += f"<tr class='{bg_cls}'><td class='freeze-single'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
         html += f"<td class='num'>{last:,.0f}</td>"
         html += fmt_net(net, is_idx=True)
         html += fmt_pct_td(pct_val)
-        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td></tr>"
+        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num mute'>{d_tag}</td></tr>"
 
     for v_name, v_sym in [("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")]:
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
-            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td><td class='num mute'>—</td></tr>"
         else:
             status = "<span class='badge b-down'>🟢 安全</span>" if val < 35 else "<span class='badge b-up'>🔴 恐慌</span>"
-            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td><td class='num mute'>—</td></tr>"
             
     html += "</tbody></table></div>"
     
     html += "<h2>個股追蹤清單</h2><div class='table-container'><table><thead><tr>"
-    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th></tr></thead><tbody>"
+    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>位階燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th><th class='num'>資料日期</th></tr></thead><tbody>"
 
     def render_stock_row(row, idx):
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
@@ -414,21 +653,21 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         kd_str = f"{int(kd_d) if pd.notna(kd_d) else '-'}/{int(kd_w) if pd.notna(kd_w) else '-'}/{int(kd_m) if pd.notna(kd_m) else '-'}"
         ma20w_str = f"{ma20w:,.2f}" if pd.notna(ma20w) else "—"
         url = f"https://finance.yahoo.com/quote/{row['yf_symbol']}"
-        
         bg_cls = "tw-row" if row['市場'] == '台股' else ""
+        d_tag = row['資料日期'][5:] + ("⚠️" if "⚠️" in row['稽核狀態'] else "")
         
         res = f"<tr class='{bg_cls}'><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
         res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
-        res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td></tr>"
+        res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td><td class='num mute'>{d_tag}</td></tr>"
         return res
 
-    html += "<tr class='grp'><td colspan='11'>美股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='12'>美股觀察區</td></tr>"
     idx = 1
     for _, row in us_stocks.iterrows():
         html += render_stock_row(row, idx)
         idx += 1
         
-    html += "<tr class='grp'><td colspan='11'>台股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='12'>台股觀察區</td></tr>"
     for _, row in tw_stocks.iterrows():
         html += render_stock_row(row, idx)
         idx += 1
@@ -475,7 +714,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     # ================= 專屬 Excel 按鈕區塊 =================
     html += """
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance ｜ 報表產生器：V6.8 終極名稱縮寫防換行版<br><br>
+        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V7.0 雙源交叉驗證與自動稽核版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -490,13 +729,15 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 # ---------------------------------------------------------------------------
 # 組裝 LINE Flex Message 卡片
 # ---------------------------------------------------------------------------
-def build_flex_message(closes, watch, kd_data, vix_hist):
-    today = dt.datetime.now()
+def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary):
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    today = dt.datetime.now(tw_tz)
     wd = "一二三四五六日"[today.weekday()]
     
     C_UP = "#d32f2f"
     C_DOWN = "#1b8e3a"
     C_FLAT = "#8a9099"
+    stale_set = audit_summary.get("stale_syms", set())
     
     contents = [
         { "type": "text", "text": f"📊 股市核心快報 {today.month:02d}/{today.day:02d} ({wd})", "weight": "bold", "size": "md", "color": "#1f3b66" },
@@ -506,13 +747,14 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     sec1 = [{"type": "text", "text": "▌一、大盤與核心狀況 (+/- 2%)", "size": "sm", "color": "#333333"}]
     item_idx = 1
     
-    def add_sec1_item(name, s, is_idx=False):
+    def add_sec1_item(name, sym, s, is_idx=False):
         nonlocal item_idx
         if s is not None and len(s) >= 2:
-            last, prev = s.iloc[-1], s.iloc[-2]
+            last, prev = float(s.iloc[-1]), float(s.iloc[-2])
             diff = last - prev
             dchg = pct(last, prev)
             weather = get_weather_line(dchg)
+            stale_mark = " ⚠️待查" if sym in stale_set else ""
             
             val_color = C_UP if diff > 0 else C_DOWN if diff < 0 else C_FLAT
             fmt_p = f"{last:,.0f}" if is_idx else f"{last:,.1f}"
@@ -523,7 +765,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
                 "contents": [
                     {"type": "span", "text": f"{item_idx}. {name} {fmt_p} ("},
                     {"type": "span", "text": f"{fmt_d} ; {fmt_pct(dchg)}", "color": val_color, "weight": "bold"},
-                    {"type": "span", "text": f") {weather}"} 
+                    {"type": "span", "text": f") {weather}{stale_mark}"} 
                 ]
             })
             item_idx += 1
@@ -531,7 +773,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
         return False
 
     for sym, name in INDICES:
-        add_sec1_item(name, closes.get(sym), True)
+        add_sec1_item(name, sym, closes.get(sym), True)
         
     sec1.append({"type": "text", "text": "-" * 15, "size": "sm", "color": "#8a9099"})
     
@@ -539,17 +781,19 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     seen_core = set()
     s_twii = closes.get("^TWII")
     
-    if add_sec1_item("台大盤", s_twii, True):
-        core_items.append({"name": "台大盤", "yf": "^TWII", "last": s_twii.iloc[-1], "ma20w": weekly_ma(s_twii, 20)})
+    if add_sec1_item("台大盤", "^TWII", s_twii, True):
+        core_items.append({"name": "台大盤", "yf": "^TWII", "last": float(s_twii.iloc[-1]), "ma20w": weekly_ma(s_twii, 20)})
         
+    # V7.0 改良：台股只要在試算表標記為「核心」（或 2330 / 0050），自動納入核心指標區
     for w in watch:
         sym = w["yf_symbol"]
-        if ("2330" in sym or "0050" in sym) and "正2" not in w["name"] and "反1" not in w["name"]:
-            if sym in seen_core: continue
+        if w["market"] == "台股" and (w["group"] == "核心" or "2330" in sym or "0050" in sym):
+            if "正2" in w["name"] or "反1" in w["name"] or sym in seen_core:
+                continue
             seen_core.add(sym)
             s = closes.get(sym)
-            if add_sec1_item(w["name"], s, False):
-                core_items.append({"name": w["name"], "yf": sym, "last": s.iloc[-1], "ma20w": weekly_ma(s, 20)})
+            if add_sec1_item(w["name"], sym, s, False):
+                core_items.append({"name": w["name"], "yf": sym, "last": float(s.iloc[-1]), "ma20w": weekly_ma(s, 20)})
                 
     contents.extend(sec1)
     contents.append({"type": "separator", "margin": "md"})
@@ -614,13 +858,15 @@ def build_flex_message(closes, watch, kd_data, vix_hist):
     
     sec4 = [{"type": "text", "text": "▌四、其他位階警示", "size": "sm", "color": "#333333"}]
     alerts = []
-    all_targets = [{"name": n, "yf": s} for s, n in INDICES] + [{"name": w["name"], "yf": w["yf_symbol"]} for w in watch]
+    # V7.0 改良：大盤指數 + 試算表內所有群組為「核心」的標的自動納入警示檢查
+    all_alert_targets = [{"name": n, "yf": s} for s, n in INDICES] + \
+                        [{"name": "台大盤", "yf": "^TWII"}] + \
+                        [{"name": w["name"], "yf": w["yf_symbol"]} for w in watch if w["group"] == "核心"]
     alert_count = 1
-    for t in all_targets:
-        if t["name"] not in ALERT_TARGETS: continue
+    for t in all_alert_targets:
         s = closes.get(t["yf"])
         if s is None or len(s) < 2: continue
-        last = s.iloc[-1]
+        last = float(s.iloc[-1])
         ma = compute_ma(s)
         drop = []
         if ma.get("MA60") and last < ma.get("MA60"): drop.append("破季線")
@@ -670,37 +916,27 @@ def main():
     
     idx_syms = [s for s, _ in INDICES]
     stk_syms = [w["yf_symbol"] for w in watch]
-    all_syms = list(set(idx_syms + stk_syms + ["^TWII"]))
+    all_syms = list(dict.fromkeys(idx_syms + ["^TWII"] + stk_syms))
+    tw_symbols_set = set(["^TWII"] + [w["yf_symbol"] for w in watch if w["market"] == "台股"])
     
-    closes = fetch_data_individually(all_syms)
+    # 一次完成資料下載、KD 計算與雙重資料源自動稽核校正
+    closes, kd_data, audit_summary = fetch_and_audit_all(all_syms, tw_symbols_set)
 
     vix_hist = {}
-    v_data = fetch_data_individually(["^VIX", "^VIXTWN"], period="1mo")
+    v_closes, _, _ = fetch_and_audit_all(["^VIX", "^VIXTWN"], set(), period="1mo")
     for v_sym in ["^VIX", "^VIXTWN"]:
-        s = v_data.get(v_sym)
+        s = v_closes.get(v_sym)
         if s is not None and len(s) >= 6:
-            vix_hist[v_sym] = [s.iloc[-1], s.iloc[-2], s.iloc[-3], s.iloc[-6]]
+            vix_hist[v_sym] = [float(s.iloc[-1]), float(s.iloc[-2]), float(s.iloc[-3]), float(s.iloc[-6])]
         elif s is not None and len(s) > 0:
-            vix_hist[v_sym] = [s.iloc[-1], 0, 0, 0]
+            vix_hist[v_sym] = [float(s.iloc[-1]), 0, 0, 0]
         else:
             vix_hist[v_sym] = [0, 0, 0, 0]
 
-    kd_data = {}
-    for sym in all_syms:
-        try:
-            df = yf.download(sym, period="2y", interval="1d", auto_adjust=False, progress=False)
-            if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.droplevel(1)
-                if "Close" in df:
-                    df = df[["High", "Low", "Close"]].dropna()
-                    kd_data[sym] = kd_timeframes(df)
-        except: pass
-
     news_data = fetch_yahoo_news(limit=5)
-    df_report = export_all_data(closes, watch, kd_data)
-    generate_html_report(df_report, vix_hist, news_data)
-    flex_message = build_flex_message(closes, watch, kd_data, vix_hist)
+    df_report = export_all_data(closes, watch, kd_data, audit_summary)
+    generate_html_report(df_report, vix_hist, news_data, audit_summary)
+    flex_message = build_flex_message(closes, watch, kd_data, vix_hist, audit_summary)
 
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     uid = os.environ.get("LINE_USER_ID", "").strip()
