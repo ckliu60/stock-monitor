@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V8.7 修復版)
+美股／台股監控推播系統 (V8.8 終極排版版)
 ---------------------------------------------------------------------------
-更新日誌 (V8.7):
-1. [Bug 修復] 修復 LINE 卡片中 VIX 歷史數據字串格式化錯誤，導致印出程式碼的問題。
-2. [極簡化] 移除核心指標區的 `｜` 符號；將短線動能「🔥雙線站上」更名為「🔥站雙線」。
-3. [網頁同步減壓] 網頁報表第四區完全取消粗體，並同步補上短線燈號後綴。
-4. [智慧免打擾] 週日與週一早上自動暫停 LINE 推播（僅更新報表），不打擾週末休息。
+更新日誌 (V8.8):
+1. [極簡化] 將短線動能「⚠️雙線跌破」更名為更簡潔的「⚠️雙線破」。
+2. [視覺對齊] 調整 LINE 卡片黑虛線位置，將「台大盤」劃入台股區塊，邏輯更清晰。
+3. [終極減壓] 徹底移除 LINE 與 HTML 網頁第四區警示中，短線燈號後綴的粗體設定，全區統一為 400 細字體。
+4. [智慧免打擾] 延續 V8.5，週日與週一早上自動暫停 LINE 推播，不打擾週末休息。
 """
 
 import os
@@ -327,7 +327,7 @@ def get_short_term_status(last, ma5, ma10):
     if pd.isna(last) or pd.isna(ma5) or pd.isna(ma10): return "—"
     if last > ma5 and last > ma10: return "🔥站雙線"
     if last > ma5 and last < ma10: return "⚡站回五日"
-    return "⚠️雙線跌破"
+    return "⚠️雙線破"
 
 def fetch_yahoo_news(limit=5):
     url = "https://tw.news.yahoo.com/rss/finance"
@@ -453,7 +453,7 @@ def generate_html_report(df, vix_hist, news_data, audit_summary):
     def get_short_badge(status_text):
         if status_text == "🔥站雙線": return '<span class="badge b-up">🔥站雙線</span>'
         if status_text == "⚡站回五日": return '<span class="badge" style="background:#e3f2fd; color:#1976d2;">⚡站回五日</span>'
-        if status_text == "⚠️雙線跌破": return '<span class="badge b-down">⚠️雙線跌破</span>'
+        if status_text == "⚠️雙線破": return '<span class="badge b-down">⚠️雙線破</span>'
         return '<span class="mute">—</span>'
         
     def get_dist_pct(last, ma20w): return "—" if pd.isna(last) or pd.isna(ma20w) or ma20w == 0 else f"{'+' if ((last - ma20w) / ma20w * 100)>0 else ''}{(last - ma20w) / ma20w * 100:.1f}%"
@@ -599,11 +599,11 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         if pd.notna(r['月K']) and r['月K'] > 80: ko80.append("月")
         
         if drop or ko80:
-            # HTML 報表中同步加入短線燈號
+            # HTML 報表中同步加入短線燈號，並確保無粗體
             short_s = r['短線燈號']
             short_html = ""
             if short_s != "—":
-                s_color = "#d32f2f" if "站上" in short_s else "#1b8e3a" if "跌破" in short_s else "#1976d2"
+                s_color = "#d32f2f" if "站上" in short_s else "#1b8e3a" if "破" in short_s else "#1976d2"
                 short_html = f" ｜ <span style='color:{s_color}; font-weight:400;'>{short_s}</span>"
 
             li_html = f"<li style='font-weight:400;'>{r['名稱']}: "
@@ -629,7 +629,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
                 <b style="color:#1f3b66;">1. 短線燈號 (5MA/10MA)</b><br>
                 🔥 <b>站雙線</b>：收盤 ＞ 5MA 且 ＞ 10MA (短線強勢)<br>
                 ⚡ <b>站回五日</b>：收盤 ＞ 5MA 但 ＜ 10MA (止跌轉強)<br>
-                ⚠️ <b>雙線跌破</b>：收盤 ＜ 5MA 且 ＜ 10MA (短線弱勢)
+                ⚠️ <b>雙線破</b>：收盤 ＜ 5MA 且 ＜ 10MA (短線弱勢)
             </div>
             <div style="flex: 1 1 280px;">
                 <b style="color:#1f3b66;">2. 長線燈號 (20週均線)</b><br>
@@ -647,7 +647,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.7 修復版<br><br>
+        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.8 終極排版版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -725,14 +725,13 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
         else:
             c_color = C_DOWN if v < 35 else C_UP
             
-            # 【修復Bug】正確使用 f-string 格式化昨日與前一週數據，並依照老爺需求正常印出
             yest_str = f"昨日{h[1]:.1f}" if h[1] > 0 else "昨日—"
             prev_str = f"前一週{h[3]:.1f}" if h[3] > 0 else "前一週—"
             
             sec2.append({
                 "type": "text", "size": "sm", "wrap": True,
                 "contents": [
-                    {"type": "span", "text": f"{i}. {v_name} {v:.1f}("},
+                    {"type": "span", "text": f"{i}. {v_name} {v:.1f} ("},
                     {"type": "span", "text": "●", "color": c_color, "size": "xxs"},
                     {"type": "span", "text": "安全" if v < 35 else "恐慌", "color": c_color, "weight": "bold"},
                     {"type": "span", "text": f"), {yest_str}, {prev_str}"}
@@ -748,12 +747,11 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
         if df_row.empty: continue
         r = df_row.iloc[0]
         kd_d, kd_w, kd_m, short_status = r['日K'], r['週K'], r['月K'], r['短線燈號']
-        short_color = C_UP if "站上" in short_status else C_DOWN if "跌破" in short_status else "#1976d2"
+        short_color = C_UP if "站上" in short_status else C_DOWN if "破" in short_status else "#1976d2"
         
         sec3.append({"type": "text", "text": f"{i}. {item['name']} ({f'{last:,.0f}' if item['yf']=='^TWII' else f'{last:,.1f}'})", "size": "sm", "color": "#333333", "margin": "sm"})
         sec3.append({
             "type": "text", "size": "sm", "wrap": True,
-            # 移除 ｜ 符號，改用全形空白間隔
             "contents": [
                 {"type": "span", "text": f"   K值: 日{int(kd_d) if pd.notna(kd_d) else '-'}/週{int(kd_w) if pd.notna(kd_w) else '-'}/月{int(kd_m) if pd.notna(kd_m) else '-'} 短線: ", "color": "#666666"},
                 {"type": "span", "text": short_status, "color": short_color}
@@ -799,11 +797,15 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
             
             short_s = r['短線燈號']
             if short_s != "—":
-                s_color = C_UP if "站上" in short_s else C_DOWN if "跌破" in short_s else "#1976d2"
-                spans.extend([{"type": "span", "text": " ｜ "}, {"type": "span", "text": short_s, "color": s_color, "weight": "bold"}])
+                s_color = C_UP if "站上" in short_s else C_DOWN if "破" in short_s else "#1976d2"
+                # 完全移除粗體 (weight: regular)
+                spans.extend([{"type": "span", "text": " ｜ ", "weight": "regular"}, {"type": "span", "text": short_s, "color": s_color, "weight": "regular"}])
                 
             block = {"type": "text", "size": "sm", "weight": "regular", "wrap": True, "contents": spans, "margin": "sm"}
-            if r['長線燈號'] == "大盤": idx_alerts.append(block)
+            
+            # 將台大盤獨立分類到美股與台股之間（透過分隔線調整）
+            if r['名稱'] == "台大盤": tw_alerts.insert(0, block)
+            elif r['長線燈號'] == "大盤": idx_alerts.append(block)
             elif r['市場'] == "台股": tw_alerts.append(block)
             else: us_alerts.append(block)
 
@@ -827,7 +829,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     contents.append({
         "type": "text", "size": "xxs", "color": "#8a9099", "wrap": True,
         "contents": [
-            {"type": "span", "text": "💡 短線: 🔥站雙線(>5/10MA)｜⚡站回五日(>5MA)｜⚠️雙線跌破\n💡 長線: 20週均上為✓安全，破線為⚠️空手｜"},
+            {"type": "span", "text": "💡 短線: 🔥站雙線(>5/10MA)｜⚡站回五日(>5MA)｜⚠️雙線破\n💡 長線: 20週均上為✓安全，破線為⚠️空手｜"},
             {"type": "span", "text": "●", "color": C_DOWN, "size": "xxs"}, {"type": "span", "text": "破季線 "},
             {"type": "span", "text": "●", "color": C_UP, "size": "xxs"}, {"type": "span", "text": "破年線"}
         ]
