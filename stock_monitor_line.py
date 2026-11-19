@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.0 夜盤三重備援強化版)
+美股／台股監控推播系統 (V9.1 雙端夜盤保底同步版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.0):
-1. [修復台指夜盤] 改用台灣奇摩新版期貨 API + 奇摩期貨網頁內嵌 JSON 解析 + 期交所近月過濾三重備援，解決清晨 06:00 期交所總表尚未更新導致夜盤空白的問題。
-2. [台大盤精準同步] 延續 V8.9，確保下午 13:30 台股大盤收盤價 100% 即時準確。
-3. [LINE 與 HTML 雙端同步] 於 LINE 卡片第一區「台大盤」下方及 HTML 網頁「大盤與 VIX 狀況」表格同步顯示「台指夜盤」。
+更新日誌 (V9.1):
+1. [LINE 夜盤保底必現] 於 LINE Flex Message 第一區補上台指夜盤 else 保底顯示邏輯，確保無論盤後資料是否處於換盤過渡期，LINE 卡片與 HTML 網頁皆 100% 同步顯示「台指夜」列。
+2. [台指夜盤三重採集] 台灣奇摩新版期貨 API + 奇摩期貨網頁內嵌 JSON 解析 + 期交所近月過濾三重備援。
+3. [台大盤精準同步] 為證交所 MI_INDEX 補上基準交易日期標籤，確保下午 13:30 台股大盤收盤價 100% 即時準確。
 """
 
 import os
@@ -307,7 +307,7 @@ def fetch_taifex_night_quote():
                     if close_s and close_s != "-":
                         candidates.append((c_month, float(close_s), chg_s, d_raw))
             if candidates:
-                candidates.sort(key=lambda x: x[0]) # 取最近月合約
+                candidates.sort(key=lambda x: x[0])
                 _, price, chg_s, d_raw = candidates[0]
                 diff = float(chg_s) if (chg_s and chg_s != "-") else 0.0
                 prev = price - diff
@@ -784,7 +784,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.0 夜盤三重備援強化版<br><br>
+        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.1 雙端夜盤保底同步版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -843,7 +843,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     if add_sec1_item("台大盤", "^TWII", s_twii, True):
         core_items.append({"name": "台大盤", "yf": "^TWII", "last": float(s_twii.iloc[-1]), "ma20w": weekly_ma(s_twii, 20)})
 
-    # 緊接在「台大盤」下方插入「台指夜」
+    # 緊接在「台大盤」下方插入「台指夜」（含保底顯示，確保任何時段都看得到）
     if night_quote and night_quote.get("price", 0) > 0:
         np = night_quote["price"]
         ndiff = night_quote["diff"]
@@ -857,6 +857,12 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
                 {"type": "span", "text": f"{ndiff:+,.0f} ; {fmt_pct(npct)}", "color": n_color, "weight": "bold"},
                 {"type": "span", "text": f") {n_weather}"}
             ]
+        })
+        item_idx += 1
+    else:
+        sec1.append({
+            "type": "text", "size": "sm", "color": "#8a9099",
+            "text": f"{item_idx}. 台指夜 — (暫無盤後)"
         })
         item_idx += 1
         
