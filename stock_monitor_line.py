@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V8.9 台大盤修復＋台指夜盤雙端同步版)
+美股／台股監控推播系統 (V9.0 夜盤三重備援強化版)
 ---------------------------------------------------------------------------
-更新日誌 (V8.9):
-1. [修復台大盤延遲] 為證交所 MI_INDEX 大盤指數補上基準交易日期標籤，徹底解決 ^TWII 停留在前天的問題。
-2. [新增台指夜盤] 串接期交所/奇摩盤後報價，抓取清晨 05:00 收盤之台指夜盤點數與漲跌幅。
+更新日誌 (V9.0):
+1. [修復台指夜盤] 改用台灣奇摩新版期貨 API + 奇摩期貨網頁內嵌 JSON 解析 + 期交所近月過濾三重備援，解決清晨 06:00 期交所總表尚未更新導致夜盤空白的問題。
+2. [台大盤精準同步] 延續 V8.9，確保下午 13:30 台股大盤收盤價 100% 即時準確。
 3. [LINE 與 HTML 雙端同步] 於 LINE 卡片第一區「台大盤」下方及 HTML 網頁「大盤與 VIX 狀況」表格同步顯示「台指夜盤」。
 """
 
 import os
 import sys
 import io
+import re
 import csv
 import time
 import json
@@ -71,7 +72,7 @@ REPORT_HTML_PATH = PUBLIC_DIR / "index.html"
 REPORT_EXCEL_PATH = PUBLIC_DIR / "report_data.xlsx"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache"
 }
@@ -130,7 +131,7 @@ def load_watchlist():
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 台股雙源採集 & 台指夜盤採集
+# 台股雙源採集 & 台指夜盤三重採集引擎
 # ---------------------------------------------------------------------------
 
 def fetch_tw_yahoo_quotes(tw_symbols):
@@ -189,11 +190,9 @@ def fetch_twse_official_quotes():
                     except: pass
     except Exception: pass
 
-    # 若無法從 STOCK_DAY_ALL 取得日期，推算最近一個台灣交易日 (避開週六、週日)
     if not latest_tw_date:
         tw_tz = dt.timezone(dt.timedelta(hours=8))
         now_tw = dt.datetime.now(tw_tz)
-        # 若在下午 14:00 前執行，日盤基準日應為前一個交易日
         ref_dt = now_tw - dt.timedelta(days=1) if now_tw.hour < 14 else now_tw
         while ref_dt.weekday() >= 5:
             ref_dt -= dt.timedelta(days=1)
@@ -218,66 +217,110 @@ def fetch_twse_official_quotes():
                                 prev_p = round(p - chg_val, 2)
                         except: pass
                         if p > 0:
-                            # 【關鍵修復】補上明確交易日期標籤 latest_tw_date，讓自動校正引擎正確寫入 ^TWII
                             twse_map["^TWII"] = {"price": p, "prev_close": prev_p, "date": latest_tw_date, "source": "證交所TWSE"}
                     break
     except: pass
     return twse_map
 
 def fetch_taifex_night_quote():
-    """抓取清晨 05:00 收盤之台指期夜盤（盤後盤）報價"""
+    """三重保險抓取台指期夜盤（清晨 05:00 收盤）報價"""
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_tw = dt.datetime.now(tw_tz)
     date_label = now_tw.strftime("%m-%d")
 
-    # 來源 1：台灣期交所 OpenAPI (盤後交易行情)
+    # 層級 1：台灣奇摩新版期貨 API (WTX& 代表台指期近月全盤/盤後最新報價)
+    try:
+        url = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList"
+        params = {"fields": "symbol,price,change,changePercent,regularMarketPreviousClose,regularMarketTime", "symbols": "WTX&"}
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            for item in items:
+                p_raw = item.get("price")
+                chg_raw = item.get("change")
+                prev_raw = item.get("regularMarketPreviousClose")
+                mkt_time = item.get("regularMarketTime")
+                if p_raw not in (None, "-", ""):
+                    price = float(str(p_raw).replace(",", ""))
+                    if chg_raw not in (None, "-", ""):
+                        diff = float(str(chg_raw).replace(",", ""))
+                        prev = price - diff
+                    elif prev_raw not in (None, "-", ""):
+                        prev = float(str(prev_raw).replace(",", ""))
+                        diff = price - prev
+                    else:
+                        diff, prev = 0.0, price
+                    pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
+                    if mkt_time:
+                        try:
+                            if str(mkt_time).isdigit():
+                                ts = int(mkt_time)
+                                if ts > 1e11: ts //= 1000
+                                date_label = dt.datetime.fromtimestamp(ts, tw_tz).strftime("%m-%d")
+                            else:
+                                date_label = str(mkt_time)[5:10]
+                        except: pass
+                    if price > 0:
+                        print(f"[台指夜盤] 成功由奇摩新版 API 取得: {price} ({diff:+.0f})")
+                        return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨API"}
+    except Exception as e:
+        print(f"[夜盤提示] 奇摩新版 API 略過: {e}")
+
+    # 層級 2：直接讀取奇摩期貨網頁內嵌 JSON (https://tw.stock.yahoo.com/future/WTX%26)
+    try:
+        r_web = requests.get("https://tw.stock.yahoo.com/future/WTX%26", headers=HEADERS, timeout=12)
+        if r_web.status_code == 200:
+            m_price = re.search(r'"price"\s*:\s*\{\s*"raw"\s*:\s*([0-9.]+)', r_web.text)
+            m_chg = re.search(r'"change"\s*:\s*\{\s*"raw"\s*:\s*([-0-9.]+)', r_web.text)
+            m_prev = re.search(r'"regularMarketPreviousClose"\s*:\s*\{\s*"raw"\s*:\s*([0-9.]+)', r_web.text)
+            if m_price:
+                price = float(m_price.group(1))
+                if m_chg:
+                    diff = float(m_chg.group(1))
+                    prev = price - diff
+                elif m_prev:
+                    prev = float(m_prev.group(1))
+                    diff = price - prev
+                else:
+                    diff, prev = 0.0, price
+                pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
+                if price > 0:
+                    print(f"[台指夜盤] 成功由奇摩期貨網頁解析取得: {price} ({diff:+.0f})")
+                    return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨網頁"}
+    except Exception as e:
+        print(f"[夜盤提示] 奇摩網頁解析略過: {e}")
+
+    # 層級 3：期交所 OpenAPI (過濾近月單一月份合約，排除價差單 "/")
     try:
         r = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", headers=HEADERS, timeout=12)
         if r.status_code == 200:
+            candidates = []
             for item in r.json():
                 contract = (item.get("Contract") or "").strip()
+                c_month = (item.get("ContractMonth(Week)") or "").strip()
                 session = (item.get("TradingSession") or "").strip()
-                # 尋找臺股期貨 (TX) 且為盤後交易時段 (After-Hours / 盤後)
-                if contract == "TX" and ("盤後" in session or "After" in session):
+                if contract == "TX" and "/" not in c_month and ("盤後" in session or "After" in session):
                     close_s = (item.get("Close") or "").replace(",", "").strip()
                     chg_s = (item.get("Change") or "").replace(",", "").strip()
                     d_raw = (item.get("Date") or "").strip()
                     if close_s and close_s != "-":
-                        price = float(close_s)
-                        diff = float(chg_s) if (chg_s and chg_s != "-") else 0.0
-                        prev = price - diff
-                        pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
-                        if len(d_raw) == 8 and d_raw.isdigit():
-                            date_label = f"{d_raw[4:6]}-{d_raw[6:8]}"
-                        if price > 0:
-                            return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "期交所盤後"}
+                        candidates.append((c_month, float(close_s), chg_s, d_raw))
+            if candidates:
+                candidates.sort(key=lambda x: x[0]) # 取最近月合約
+                _, price, chg_s, d_raw = candidates[0]
+                diff = float(chg_s) if (chg_s and chg_s != "-") else 0.0
+                prev = price - diff
+                pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
+                if len(d_raw) == 8 and d_raw.isdigit():
+                    date_label = f"{d_raw[4:6]}-{d_raw[6:8]}"
+                if price > 0:
+                    print(f"[台指夜盤] 成功由期交所 OpenAPI 取得: {price} ({diff:+.0f})")
+                    return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "期交所盤後"}
     except Exception as e:
-        print(f"[稽核提示] 期交所 OpenAPI 查詢略過: {e}")
+        print(f"[夜盤提示] 期交所 OpenAPI 略過: {e}")
 
-    # 來源 2：台灣奇摩期貨即時/盤後報價 API (WTX& 台指期近月/盤後)
-    try:
-        url = "https://tw.quote.finance.yahoo.net/quote/q"
-        params = {"type": "taifex", "perd": "m", "mkt": "10", "sym": "WTX&"}
-        r2 = requests.get(url, params=params, headers=HEADERS, timeout=12)
-        if r2.status_code == 200:
-            txt = r2.text
-            start = txt.find("{")
-            end = txt.rfind("}") + 1
-            if start != -1 and end > start:
-                j = json.loads(txt[start:end])
-                mem = j.get("mkt", {}).get("10", {}).get("WTX&", {})
-                p_raw = mem.get("125") or mem.get("z")
-                prev_raw = mem.get("129") or mem.get("y")
-                if p_raw and prev_raw:
-                    price = float(p_raw)
-                    prev = float(prev_raw)
-                    diff = price - prev
-                    pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
-                    if price > 0:
-                        return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨盤後"}
-    except Exception as e:
-        print(f"[稽核提示] 奇摩期貨盤後查詢略過: {e}")
-
+    print("[夜盤警告] 三重資料源皆未取回有效台指夜盤報價。")
     return None
 
 # ---------------------------------------------------------------------------
@@ -741,7 +784,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.9 台大盤修復＋台指夜盤雙端同步版<br><br>
+        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.0 夜盤三重備援強化版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
