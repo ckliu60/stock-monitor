@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V8.8 終極排版版)
+美股／台股監控推播系統 (V8.9 台大盤修復＋台指夜盤雙端同步版)
 ---------------------------------------------------------------------------
-更新日誌 (V8.8):
-1. [極簡化] 將短線動能「⚠️雙線跌破」更名為更簡潔的「⚠️雙線破」。
-2. [視覺對齊] 調整 LINE 卡片黑虛線位置，將「台大盤」劃入台股區塊，邏輯更清晰。
-3. [終極減壓] 徹底移除 LINE 與 HTML 網頁第四區警示中，短線燈號後綴的粗體設定，全區統一為 400 細字體。
-4. [智慧免打擾] 延續 V8.5，週日與週一早上自動暫停 LINE 推播，不打擾週末休息。
+更新日誌 (V8.9):
+1. [修復台大盤延遲] 為證交所 MI_INDEX 大盤指數補上基準交易日期標籤，徹底解決 ^TWII 停留在前天的問題。
+2. [新增台指夜盤] 串接期交所/奇摩盤後報價，抓取清晨 05:00 收盤之台指夜盤點數與漲跌幅。
+3. [LINE 與 HTML 雙端同步] 於 LINE 卡片第一區「台大盤」下方及 HTML 網頁「大盤與 VIX 狀況」表格同步顯示「台指夜盤」。
 """
 
 import os
@@ -131,7 +130,7 @@ def load_watchlist():
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 台股雙源採集
+# 台股雙源採集 & 台指夜盤採集
 # ---------------------------------------------------------------------------
 
 def fetch_tw_yahoo_quotes(tw_symbols):
@@ -169,6 +168,7 @@ def fetch_tw_yahoo_quotes(tw_symbols):
 
 def fetch_twse_official_quotes():
     twse_map = {}
+    latest_tw_date = None
     try:
         r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=12)
         if r.status_code == 200:
@@ -183,9 +183,21 @@ def fetch_twse_official_quotes():
                         if len(date_roc) == 7 and date_roc.isdigit():
                             y = int(date_roc[:3]) + 1911
                             d_str = f"{y:04d}-{date_roc[3:5]}-{date_roc[5:7]}"
+                            if not latest_tw_date or d_str > latest_tw_date:
+                                latest_tw_date = d_str
                         if p > 0: twse_map[f"{code}.TW"] = {"price": p, "prev_close": None, "date": d_str, "source": "證交所TWSE"}
                     except: pass
     except Exception: pass
+
+    # 若無法從 STOCK_DAY_ALL 取得日期，推算最近一個台灣交易日 (避開週六、週日)
+    if not latest_tw_date:
+        tw_tz = dt.timezone(dt.timedelta(hours=8))
+        now_tw = dt.datetime.now(tw_tz)
+        # 若在下午 14:00 前執行，日盤基準日應為前一個交易日
+        ref_dt = now_tw - dt.timedelta(days=1) if now_tw.hour < 14 else now_tw
+        while ref_dt.weekday() >= 5:
+            ref_dt -= dt.timedelta(days=1)
+        latest_tw_date = ref_dt.strftime("%Y-%m-%d")
 
     try:
         r2 = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12)
@@ -194,12 +206,79 @@ def fetch_twse_official_quotes():
                 idx_name = item.get("指數", "")
                 if "發行量加權股價指數" in idx_name:
                     close_s = (item.get("收盤指數") or "").replace(",", "").strip()
+                    chg_s = (item.get("漲跌點數") or "").replace(",", "").strip()
+                    dir_s = (item.get("漲跌") or "").strip()
                     if close_s:
                         p = float(close_s)
-                        if p > 0: twse_map["^TWII"] = {"price": p, "prev_close": None, "date": None, "source": "證交所TWSE"}
+                        prev_p = None
+                        try:
+                            if chg_s:
+                                chg_val = float(chg_s)
+                                if "-" in dir_s or "跌" in dir_s: chg_val = -abs(chg_val)
+                                prev_p = round(p - chg_val, 2)
+                        except: pass
+                        if p > 0:
+                            # 【關鍵修復】補上明確交易日期標籤 latest_tw_date，讓自動校正引擎正確寫入 ^TWII
+                            twse_map["^TWII"] = {"price": p, "prev_close": prev_p, "date": latest_tw_date, "source": "證交所TWSE"}
                     break
     except: pass
     return twse_map
+
+def fetch_taifex_night_quote():
+    """抓取清晨 05:00 收盤之台指期夜盤（盤後盤）報價"""
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    now_tw = dt.datetime.now(tw_tz)
+    date_label = now_tw.strftime("%m-%d")
+
+    # 來源 1：台灣期交所 OpenAPI (盤後交易行情)
+    try:
+        r = requests.get("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            for item in r.json():
+                contract = (item.get("Contract") or "").strip()
+                session = (item.get("TradingSession") or "").strip()
+                # 尋找臺股期貨 (TX) 且為盤後交易時段 (After-Hours / 盤後)
+                if contract == "TX" and ("盤後" in session or "After" in session):
+                    close_s = (item.get("Close") or "").replace(",", "").strip()
+                    chg_s = (item.get("Change") or "").replace(",", "").strip()
+                    d_raw = (item.get("Date") or "").strip()
+                    if close_s and close_s != "-":
+                        price = float(close_s)
+                        diff = float(chg_s) if (chg_s and chg_s != "-") else 0.0
+                        prev = price - diff
+                        pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
+                        if len(d_raw) == 8 and d_raw.isdigit():
+                            date_label = f"{d_raw[4:6]}-{d_raw[6:8]}"
+                        if price > 0:
+                            return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "期交所盤後"}
+    except Exception as e:
+        print(f"[稽核提示] 期交所 OpenAPI 查詢略過: {e}")
+
+    # 來源 2：台灣奇摩期貨即時/盤後報價 API (WTX& 台指期近月/盤後)
+    try:
+        url = "https://tw.quote.finance.yahoo.net/quote/q"
+        params = {"type": "taifex", "perd": "m", "mkt": "10", "sym": "WTX&"}
+        r2 = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        if r2.status_code == 200:
+            txt = r2.text
+            start = txt.find("{")
+            end = txt.rfind("}") + 1
+            if start != -1 and end > start:
+                j = json.loads(txt[start:end])
+                mem = j.get("mkt", {}).get("10", {}).get("WTX&", {})
+                p_raw = mem.get("125") or mem.get("z")
+                prev_raw = mem.get("129") or mem.get("y")
+                if p_raw and prev_raw:
+                    price = float(p_raw)
+                    prev = float(prev_raw)
+                    diff = price - prev
+                    pct_val = (diff / prev * 100.0) if prev > 0 else 0.0
+                    if price > 0:
+                        return {"price": price, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨盤後"}
+    except Exception as e:
+        print(f"[稽核提示] 奇摩期貨盤後查詢略過: {e}")
+
+    return None
 
 # ---------------------------------------------------------------------------
 # 主抓取與自動稽核引擎
@@ -249,6 +328,7 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                     if alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev > 0.002: df.loc[df.index[-1], "Close"] = alt_prev
                     df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
                     corrected_count += 1
+                    print(f"[自動校正] {sym} 補入 {alt_info['source']} 最新收盤 ({alt_d}): {alt_p}")
                 elif alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev < 0.001 and abs(alt_p - yf_last_price) / yf_last_price > 0.001:
                     tw_today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y-%m-%d")
                     new_ts = pd.Timestamp(tw_today if tw_today > yf_last_date else (df.index[-1] + pd.Timedelta(days=1)))
@@ -406,7 +486,7 @@ def export_all_data(closes, watch, kd_data, audit_summary):
         
     return df
 
-def generate_html_report(df, vix_hist, news_data, audit_summary):
+def generate_html_report(df, vix_hist, news_data, audit_summary, night_quote=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_str = dt.datetime.now(tw_tz).strftime("%Y/%m/%d %H:%M")
     
@@ -530,13 +610,28 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         html += fmt_net(net, is_idx=True) + fmt_pct_td(pct_val)
         html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{status}</td><td class='num mute'>{d_tag}</td></tr>"
 
+        # 緊接在「台大盤」下方插入「台指夜盤」
+        if row['yf_symbol'] == '^TWII':
+            if night_quote and night_quote.get("price", 0) > 0:
+                np = night_quote["price"]
+                ndiff = night_quote["diff"]
+                npct = night_quote["pct"]
+                n_weather = get_weather_icon(npct, 2.0)
+                n_date_tag = f"{night_quote.get('date', '')} 盤後"
+                html += f"<tr class='tw-row'><td class='freeze-single'><a href='https://tw.stock.yahoo.com/future/WTX%26' target='_blank'>台指夜盤</a></td>"
+                html += f"<td class='num'>{np:,.0f}</td>"
+                html += fmt_net(ndiff, is_idx=True) + fmt_pct_td(npct)
+                html += f"<td class='num'>{n_weather}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'><span class='badge b-safe'>夜盤收盤</span></td><td class='num mute'>{n_date_tag}</td></tr>"
+            else:
+                html += f"<tr class='tw-row'><td class='freeze-single'>台指夜盤</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無盤後</td><td class='num mute'>—</td></tr>"
+
     for v_name, v_sym in [("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")]:
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
             html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td><td class='num mute'>—</td></tr>"
         else:
-            status = "<span class='badge b-down'>🟢 安全</span>" if val < 35 else "<span class='badge b-up'>🔴 恐慌</span>"
+            status = "<span class='badge b-down'><span class='s-dot'>●</span> 安全</span>" if val < 35 else "<span class='badge b-up'><span class='s-dot'>●</span> 恐慌</span>"
             html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td><td class='num mute'>—</td></tr>"
             
     html += "</tbody></table></div>"
@@ -599,7 +694,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         if pd.notna(r['月K']) and r['月K'] > 80: ko80.append("月")
         
         if drop or ko80:
-            # HTML 報表中同步加入短線燈號，並確保無粗體
             short_s = r['短線燈號']
             short_html = ""
             if short_s != "—":
@@ -647,7 +741,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.8 終極排版版<br><br>
+        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V8.9 台大盤修復＋台指夜盤雙端同步版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -659,7 +753,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 # ---------------------------------------------------------------------------
 # 組裝 LINE Flex Message 卡片
 # ---------------------------------------------------------------------------
-def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report):
+def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report, night_quote=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     today = dt.datetime.now(tw_tz)
     wd = "一二三四五六日"[today.weekday()]
@@ -705,6 +799,23 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     s_twii = closes.get("^TWII")
     if add_sec1_item("台大盤", "^TWII", s_twii, True):
         core_items.append({"name": "台大盤", "yf": "^TWII", "last": float(s_twii.iloc[-1]), "ma20w": weekly_ma(s_twii, 20)})
+
+    # 緊接在「台大盤」下方插入「台指夜」
+    if night_quote and night_quote.get("price", 0) > 0:
+        np = night_quote["price"]
+        ndiff = night_quote["diff"]
+        npct = night_quote["pct"]
+        n_weather = get_weather_line(npct)
+        n_color = C_UP if ndiff > 0 else C_DOWN if ndiff < 0 else C_FLAT
+        sec1.append({
+            "type": "text", "size": "sm", "wrap": True,
+            "contents": [
+                {"type": "span", "text": f"{item_idx}. 台指夜 {np:,.0f} ("},
+                {"type": "span", "text": f"{ndiff:+,.0f} ; {fmt_pct(npct)}", "color": n_color, "weight": "bold"},
+                {"type": "span", "text": f") {n_weather}"}
+            ]
+        })
+        item_idx += 1
         
     for w in watch:
         sym = w["yf_symbol"]
@@ -724,7 +835,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
         if v is None or v <= 0: sec2.append({"type": "text", "text": f"{i}. {v_name} — (暫無報價)", "size": "sm", "color": "#8a9099"})
         else:
             c_color = C_DOWN if v < 35 else C_UP
-            
             yest_str = f"昨日{h[1]:.1f}" if h[1] > 0 else "昨日—"
             prev_str = f"前一週{h[3]:.1f}" if h[3] > 0 else "前一週—"
             
@@ -798,12 +908,10 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
             short_s = r['短線燈號']
             if short_s != "—":
                 s_color = C_UP if "站上" in short_s else C_DOWN if "破" in short_s else "#1976d2"
-                # 完全移除粗體 (weight: regular)
                 spans.extend([{"type": "span", "text": " ｜ ", "weight": "regular"}, {"type": "span", "text": short_s, "color": s_color, "weight": "regular"}])
                 
             block = {"type": "text", "size": "sm", "weight": "regular", "wrap": True, "contents": spans, "margin": "sm"}
             
-            # 將台大盤獨立分類到美股與台股之間（透過分隔線調整）
             if r['名稱'] == "台大盤": tw_alerts.insert(0, block)
             elif r['長線燈號'] == "大盤": idx_alerts.append(block)
             elif r['市場'] == "台股": tw_alerts.append(block)
@@ -869,6 +977,7 @@ def main():
     tw_symbols_set = set(["^TWII"] + [w["yf_symbol"] for w in watch if w["market"] == "台股"])
     
     closes, kd_data, audit_summary = fetch_and_audit_all(all_syms, tw_symbols_set)
+    night_quote = fetch_taifex_night_quote()
 
     vix_hist = {}
     v_closes, _, _ = fetch_and_audit_all(["^VIX", "^VIXTWN"], set(), period="1mo")
@@ -880,11 +989,11 @@ def main():
 
     news_data = fetch_yahoo_news(limit=5)
     df_report = export_all_data(closes, watch, kd_data, audit_summary)
-    generate_html_report(df_report, vix_hist, news_data, audit_summary)
+    generate_html_report(df_report, vix_hist, news_data, audit_summary, night_quote)
     
     if skip_line_push: return 0
     
-    flex_message = build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report)
+    flex_message = build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report, night_quote)
 
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     uid = os.environ.get("LINE_USER_ID", "").strip()
