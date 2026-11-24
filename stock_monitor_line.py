@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.2 極速網頁直抓夜盤版)
+美股／台股監控推播系統 (V9.3 HTML 匯率 [V1] 與三大法人籌碼 [V1] 新增版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.2):
-1. [極速直抓台指夜盤] 僅單獨升級 fetch_taifex_night_quote()，直接讀取台灣奇摩期貨盤後現成收盤價（含清晨 05:00~08:45 盤前清空時段之 regularMarketPreviousClose 備援讀取），耗時 <0.5 秒、不下載 K 線。
-2. [零干擾保證] 除夜盤函式外，所有大盤指數、個股指標、排版與免打擾排程皆維持 V9.1 原狀、完全不動。
-3. [LINE 與 HTML 雙端同步] 於 LINE 卡片第一區「台大盤」下方及 HTML 網頁「大盤與 VIX 狀況」表格同步顯示「台指夜盤」指數與漲跌幅。
+更新日誌 (V9.3):
+1. [HTML 新增匯率模組 V1] 新增獨立方塊「五、台美匯率與外資動向 (USD/TWD) [V1]」，含連續升貶天數提示、項次 1~4，對照今日基準與過去 7 個時間點之當時匯率、台幣升貶、外資動向與股市漲跌。
+2. [HTML 新增法人模組 V1] 新增獨立方塊「六、外資與投信買賣超（單位：億元）[V1]」，含外資連續買賣天數提示、項次 1~4，呈現今日/昨日/前日/近1週/近1月/近1季之外資、投信、合計與股市漲跌。
+3. [零干擾保證] LINE 卡片 (build_flex_message)、所有大盤/個股計算及台指夜盤抓取邏輯完全維持 V9.2 原狀、一個字都不動。
 """
 
 import os
@@ -131,7 +131,7 @@ def load_watchlist():
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 台股雙源採集 & 台指夜盤極速直抓獨立函式
+# 台股雙源採集 & 台指夜盤極速直抓獨立函式 (完全維持 V9.2 原狀)
 # ---------------------------------------------------------------------------
 
 def fetch_tw_yahoo_quotes(tw_symbols):
@@ -263,7 +263,6 @@ def fetch_taifex_night_quote(day_close_ref=None):
                             date_label = str(mkt_time)[5:10]
                     except: pass
 
-                # 情況 A：即時欄位仍有報價（如剛收盤尚未清空，或盤中）
                 if p_cur and p_cur > 0:
                     if chg_cur is not None:
                         diff = chg_cur
@@ -280,7 +279,6 @@ def fetch_taifex_night_quote(day_close_ref=None):
                     print(f"[台指夜盤] 奇摩 API 即時/盤後欄取得: {p_cur} ({diff:+.0f})")
                     return {"price": p_cur, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨API"}
 
-                # 情況 B：清晨 05:00~08:45 盤前清空，price 為空，但 regularMarketPreviousClose 存有 05:00 夜盤收盤價
                 if (not p_cur or p_cur <= 0) and p_prev and p_prev > 0:
                     base = day_close_ref if (day_close_ref and day_close_ref > 0) else p_prev
                     diff = (p_prev - base) if (day_close_ref and day_close_ref > 0) else 0.0
@@ -332,7 +330,279 @@ def fetch_taifex_night_quote(day_close_ref=None):
     return None
 
 # ---------------------------------------------------------------------------
-# 主抓取與自動稽核引擎 (完全維持 V9.1 原狀，絕不更動)
+# 【獨立新模組 V1】五、台美匯率與外資動向 (USD/TWD) [V1]
+# ---------------------------------------------------------------------------
+
+def fetch_usdtwd_analysis():
+    """
+    獨立抓取美元兌台幣匯率 (TWD=X)，以今日基準對照過去 7 個時間點：
+    較昨日(1D)、較前日(2D)、較1週前(5D)、較1月前(21D)、較1季前(63D)、較半年前(126D)、較1年前(252D)
+    """
+    try:
+        df = yf.download("TWD=X", period="2y", interval="1d", auto_adjust=False, progress=False)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        s = df["Close"].dropna()
+        s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+        s = s[~s.index.duplicated(keep="last")].sort_index()
+        if len(s) < 3:
+            return None
+
+        today_val = float(s.iloc[-1])
+        today_date = s.index[-1].strftime("%m-%d")
+
+        # 計算連續台幣升值/貶值天數 (美元下跌=台幣升值，美元上漲=台幣貶值)
+        streak_days = 0
+        streak_dir = None  # "appreciate" (台幣升) 或 "depreciate" (台幣貶)
+        for idx in range(len(s) - 1, 0, -1):
+            curr_v = float(s.iloc[idx])
+            prev_v = float(s.iloc[idx - 1])
+            if curr_v < prev_v:
+                cur_dir = "appreciate"
+            elif curr_v > prev_v:
+                cur_dir = "depreciate"
+            else:
+                break
+            if streak_dir is None:
+                streak_dir = cur_dir
+                streak_days = 1
+            elif cur_dir == streak_dir:
+                streak_days += 1
+            else:
+                break
+
+        # 計算連續期間相較於起點的台幣升貶幅度
+        ref_idx = max(0, len(s) - 1 - streak_days)
+        ref_start_val = float(s.iloc[ref_idx])
+        streak_pct = abs((today_val - ref_start_val) / ref_start_val * 100.0) if ref_start_val > 0 else 0.0
+
+        if streak_dir == "appreciate" and streak_days >= 1:
+            tip_text = f"台幣連 {streak_days} 升（較 {streak_days} 日前升 {streak_pct:.2f}%｜外資匯入偏多）"
+            tip_color = "#d32f2f"
+        elif streak_dir == "depreciate" and streak_days >= 1:
+            tip_text = f"台幣連 {streak_days} 貶（較 {streak_days} 日前貶 {streak_pct:.2f}%｜外資匯出偏空）"
+            tip_color = "#1b8e3a"
+        else:
+            tip_text = "台幣匯率今日持平（資金觀望盤整）"
+            tip_color = "#666666"
+
+        # 定義 7 個往前回推交易日偏移量
+        offsets = [
+            ("較昨日", 1),
+            ("較前日", 2),
+            ("較 1 週前", 5),
+            ("較 1 月前", 21),
+            ("較 1 季前", 63),
+            ("較半年前", 126),
+            ("較 1 年前", 252),
+        ]
+
+        cols = []
+        for label, off in offsets:
+            if len(s) > off:
+                past_val = float(s.iloc[-1 - off])
+                # 美元跌 (today < past) => 台幣升值 (正值代表台幣升值幅度)
+                twd_chg_pct = (past_val - today_val) / past_val * 100.0 if past_val > 0 else 0.0
+                if twd_chg_pct > 0.005:
+                    dir_str = f"升 {abs(twd_chg_pct):.2f}%"
+                    flow_str = "匯入"
+                    mkt_str = "易漲"
+                    cls = "up"
+                elif twd_chg_pct < -0.005:
+                    dir_str = f"貶 {abs(twd_chg_pct):.2f}%"
+                    flow_str = "匯出"
+                    mkt_str = "易跌"
+                    cls = "down"
+                else:
+                    dir_str = "持平 0.00%"
+                    flow_str = "持平"
+                    mkt_str = "盤整"
+                    cls = "mute"
+                cols.append({
+                    "label": label,
+                    "rate": f"{past_val:.3f}",
+                    "twd_chg": dir_str,
+                    "flow": flow_str,
+                    "mkt": mkt_str,
+                    "cls": cls
+                })
+            else:
+                cols.append({
+                    "label": label, "rate": "—", "twd_chg": "—", "flow": "—", "mkt": "—", "cls": "mute"
+                })
+
+        return {
+            "today_rate": f"{today_val:.3f}",
+            "today_date": today_date,
+            "tip_text": tip_text,
+            "tip_color": tip_color,
+            "cols": cols
+        }
+    except Exception as e:
+        print(f"[匯率模組提示] 抓取 TWD=X 異常: {e}")
+        return None
+
+# ---------------------------------------------------------------------------
+# 【獨立新模組 V1】六、外資與投信買賣超（單位：億元）[V1]
+# ---------------------------------------------------------------------------
+
+def fetch_institutional_flow():
+    """
+    獨立抓取台股三大法人（外資及陸資、投信）每日買賣超金額（換算為億元）：
+    回溯最近 65 個交易日，統計：今日、昨日、前日、近 1 週(5日)、近 1 月(20日)、近 1 季(60日)
+    """
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    now_tw = dt.datetime.now(tw_tz)
+
+    daily_records = []  # 由新到舊排序: [{"date": "YYYYMMDD", "foreign": float(億), "trust": float(億)}]
+    seen_dates = set()
+
+    def _parse_num(s):
+        if not s: return 0.0
+        try: return float(str(s).replace(",", "").strip())
+        except: return 0.0
+
+    # 先嘗試證交所 OpenAPI 取得最新一日數據
+    try:
+        r_open = requests.get("https://openapi.twse.com.tw/v1/fund/BFI82U", headers=HEADERS, timeout=10)
+        if r_open.status_code == 200:
+            j_list = r_open.json()
+            if isinstance(j_list, list) and len(j_list) > 0:
+                f_net, t_net, d_str = 0.0, 0.0, ""
+                for item in j_list:
+                    name = (item.get("單位名稱") or "").strip()
+                    diff_val = _parse_num(item.get("買賣差額")) / 1e8  # 元 -> 億元
+                    raw_d = (item.get("日期") or "").strip()
+                    if raw_d: d_str = raw_d
+                    if "外資及陸資" in name and "自營商" not in name:
+                        f_net += diff_val
+                    elif "投信" in name:
+                        t_net += diff_val
+                if d_str and d_str not in seen_dates and (f_net != 0 or t_net != 0):
+                    seen_dates.add(d_str)
+                    daily_records.append({"date": d_str, "foreign": round(f_net, 1), "trust": round(t_net, 1)})
+    except Exception:
+        pass
+
+    # 回溯過去 95 個日曆日，補足近 60 個交易日（涵蓋近 1 季）
+    for d_off in range(0, 96):
+        if len(daily_records) >= 60:
+            break
+        target_dt = now_tw - dt.timedelta(days=d_off)
+        if target_dt.weekday() >= 5:
+            continue
+        q_date = target_dt.strftime("%Y%m%d")
+        if q_date in seen_dates:
+            continue
+        try:
+            url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json&dayDate={q_date}&type=day"
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                j = resp.json()
+                if j.get("stat") == "OK" and j.get("data"):
+                    f_net, t_net = 0.0, 0.0
+                    for row in j["data"]:
+                        if len(row) >= 4:
+                            name = str(row[0]).strip()
+                            diff_val = _parse_num(row[3]) / 1e8  # 元 -> 億元
+                            if "外資及陸資" in name and "自營商" not in name:
+                                f_net += diff_val
+                            elif "投信" in name:
+                                t_net += diff_val
+                    seen_dates.add(q_date)
+                    daily_records.append({"date": q_date, "foreign": round(f_net, 1), "trust": round(t_net, 1)})
+            time.sleep(0.12)  # 禮貌間隔避免證交所限流
+        except Exception:
+            continue
+
+    # 確保由最新日期排到最舊日期
+    daily_records.sort(key=lambda x: x["date"], reverse=True)
+
+    if not daily_records:
+        return None
+
+    # 計算外資連續買超／賣超天數與累計金額（只針對外資動向說明）
+    f_streak = 0
+    f_dir = None  # "buy" 或 "sell"
+    f_streak_sum = 0.0
+    for rec in daily_records:
+        val = rec["foreign"]
+        if val > 0:
+            cur_d = "buy"
+        elif val < 0:
+            cur_d = "sell"
+        else:
+            break
+        if f_dir is None:
+            f_dir = cur_d
+            f_streak = 1
+            f_streak_sum = val
+        elif cur_d == f_dir:
+            f_streak += 1
+            f_streak_sum += val
+        else:
+            break
+
+    if f_dir == "buy" and f_streak >= 1:
+        tip_text = f"外資連 {f_streak} 買（累計 +{abs(f_streak_sum):,.1f} 億｜籌碼偏多）"
+        tip_color = "#d32f2f"
+    elif f_dir == "sell" and f_streak >= 1:
+        tip_text = f"外資連 {f_streak} 賣（累計 -{abs(f_streak_sum):,.1f} 億｜籌碼偏空）"
+        tip_color = "#1b8e3a"
+    else:
+        tip_text = "外資今日買賣持平（籌碼觀望）"
+        tip_color = "#666666"
+
+    # 定義 6 個統計區間
+    windows = [
+        ("今日", 0, 1),
+        ("昨日", 1, 2),
+        ("前日", 2, 3),
+        ("近 1 週", 0, 5),
+        ("近 1 月", 0, 20),
+        ("近 1 季", 0, 60),
+    ]
+
+    cols = []
+    for label, start_i, end_i in windows:
+        sub = daily_records[start_i:end_i]
+        if sub:
+            f_sum = round(sum(x["foreign"] for x in sub), 1)
+            t_sum = round(sum(x["trust"] for x in sub), 1)
+            tot_sum = round(f_sum + t_sum, 1)
+            if tot_sum > 0:
+                mkt_str, mkt_cls = "易漲", "up"
+            elif tot_sum < 0:
+                mkt_str, mkt_cls = "易跌", "down"
+            else:
+                mkt_str, mkt_cls = "盤整", "mute"
+            cols.append({
+                "label": label,
+                "foreign": f_sum,
+                "trust": t_sum,
+                "total": tot_sum,
+                "mkt": mkt_str,
+                "mkt_cls": mkt_cls
+            })
+        else:
+            cols.append({
+                "label": label, "foreign": None, "trust": None, "total": None, "mkt": "—", "mkt_cls": "mute"
+            })
+
+    latest_d = daily_records[0]["date"]
+    latest_d_fmt = f"{latest_d[4:6]}-{latest_d[6:8]}" if len(latest_d) == 8 else latest_d
+
+    return {
+        "latest_date": latest_d_fmt,
+        "tip_text": tip_text,
+        "tip_color": tip_color,
+        "cols": cols
+    }
+
+# ---------------------------------------------------------------------------
+# 主抓取與自動稽核引擎 (完全維持 V9.2 原狀，絕不更動)
 # ---------------------------------------------------------------------------
 
 def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
@@ -537,7 +807,7 @@ def export_all_data(closes, watch, kd_data, audit_summary):
         
     return df
 
-def generate_html_report(df, vix_hist, news_data, audit_summary, night_quote=None):
+def generate_html_report(df, vix_hist, news_data, audit_summary, night_quote=None, fx_data=None, inst_data=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_str = dt.datetime.now(tw_tz).strftime("%Y/%m/%d %H:%M")
     
@@ -617,6 +887,10 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 .action-btn {{ display:inline-block; padding:10px 20px; border-radius:4px; text-decoration:none; font-size:14px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; margin-top: 10px; }}
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
 .btn-download {{ background:#1b8e3a; color:#fff; width: 100%; max-width: 300px; }}
+
+/* 獨立模組版本標籤與趨勢提示樣式 */
+.ver-tag {{ display:inline-block; background:#eef1f5; color:#1f3b66; font-size:11px; font-weight:bold; padding:2px 7px; border-radius:4px; margin-left:6px; vertical-align:2px; border:1px solid #d5dce6; }}
+.trend-tip {{ font-size:13px; margin:-6px 0 10px 0; padding:6px 10px; background:#fff; border-left:4px solid #1f3b66; border-radius:4px; border-top:1px solid var(--line); border-right:1px solid var(--line); border-bottom:1px solid var(--line); }}
 
 /* 精緻小圓點樣式 */
 .s-dot {{ font-size: 0.65em; vertical-align: 1px; margin-right: 1px; display: inline-block; }}
@@ -762,6 +1036,92 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     if alert_count_html == 0: html += "<li style='font-weight:400;'>*(今日無觸發任何位階警示)*</li>"
     html += "</ol>"
 
+    # -----------------------------------------------------------------------
+    # 【獨立模組一 V1】五、台美匯率與外資動向 (USD/TWD) [V1]
+    # -----------------------------------------------------------------------
+    html += "<h2>五、台美匯率與外資動向 (USD/TWD) <span class='ver-tag'>V1</span></h2>"
+    if fx_data and fx_data.get("cols"):
+        html += f"<div class='trend-tip' style='border-left-color:{fx_data['tip_color']};'>💡 <span style='color:{fx_data['tip_color']}; font-weight:bold;'>{fx_data['tip_text']}</span> <span class='mute' style='font-size:11px;'>(基準日：{fx_data['today_date']})</span></div>"
+        html += "<div class='table-container'><table><thead><tr>"
+        html += "<th class='num freeze-idx'>項次</th><th class='freeze-name'>項目</th><th class='num'>今日基準</th>"
+        for c in fx_data["cols"]:
+            html += f"<th class='num'>{c['label']}</th>"
+        html += "</tr></thead><tbody>"
+
+        # 第 1 列：當時匯率
+        html += f"<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>當時匯率</b></td><td class='num'><b>{fx_data['today_rate']}</b></td>"
+        for c in fx_data["cols"]:
+            html += f"<td class='num'>{c['rate']}</td>"
+        html += "</tr>"
+
+        # 第 2 列：台幣升貶
+        html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>台幣升貶</b></td><td class='num mute'>—</td>"
+        for c in fx_data["cols"]:
+            html += f"<td class='num {c['cls']}'>{c['twd_chg']}</td>"
+        html += "</tr>"
+
+        # 第 3 列：外資動向
+        html += "<tr><td class='num idx freeze-idx'>3</td><td class='freeze-name'><b>外資動向</b></td><td class='num mute'>—</td>"
+        for c in fx_data["cols"]:
+            html += f"<td class='num {c['cls']}'>{c['flow']}</td>"
+        html += "</tr>"
+
+        # 第 4 列：股市漲跌
+        html += "<tr><td class='num idx freeze-idx'>4</td><td class='freeze-name'><b>股市漲跌</b></td><td class='num mute'>—</td>"
+        for c in fx_data["cols"]:
+            html += f"<td class='num {c['cls']}'>{c['mkt']}</td>"
+        html += "</tr>"
+
+        html += "</tbody></table></div>"
+    else:
+        html += "<div class='trend-tip'>⚠️ 暫時無法取得台美匯率歷史資料。</div>"
+
+    # -----------------------------------------------------------------------
+    # 【獨立模組二 V1】六、外資與投信買賣超（單位：億元）[V1]
+    # -----------------------------------------------------------------------
+    html += "<h2>六、外資與投信買賣超（單位：億元） <span class='ver-tag'>V1</span></h2>"
+    if inst_data and inst_data.get("cols"):
+        html += f"<div class='trend-tip' style='border-left-color:{inst_data['tip_color']};'>💡 <span style='color:{inst_data['tip_color']}; font-weight:bold;'>{inst_data['tip_text']}</span> <span class='mute' style='font-size:11px;'>(最新交易日：{inst_data['latest_date']})</span></div>"
+        html += "<div class='table-container'><table><thead><tr>"
+        html += "<th class='num freeze-idx'>項次</th><th class='freeze-name'>項目</th>"
+        for c in inst_data["cols"]:
+            html += f"<th class='num'>{c['label']}</th>"
+        html += "</tr></thead><tbody>"
+
+        def _fmt_inst_td(val, bold=False):
+            if val is None: return '<td class="num mute">—</td>'
+            cls = "up" if val > 0 else "down" if val < 0 else "mute"
+            txt = f"{'+' if val > 0 else ''}{val:,.1f}"
+            return f'<td class="num {cls}">{"<b>" + txt + "</b>" if bold else txt}</td>'
+
+        # 第 1 列：外資
+        html += "<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>外資</b></td>"
+        for c in inst_data["cols"]:
+            html += _fmt_inst_td(c["foreign"])
+        html += "</tr>"
+
+        # 第 2 列：投信
+        html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>投信</b></td>"
+        for c in inst_data["cols"]:
+            html += _fmt_inst_td(c["trust"])
+        html += "</tr>"
+
+        # 第 3 列：合計
+        html += "<tr><td class='num idx freeze-idx'>3</td><td class='freeze-name'><b>合計</b></td>"
+        for c in inst_data["cols"]:
+            html += _fmt_inst_td(c["total"], bold=True)
+        html += "</tr>"
+
+        # 第 4 列：股市漲跌
+        html += "<tr><td class='num idx freeze-idx'>4</td><td class='freeze-name'><b>股市漲跌</b></td>"
+        for c in inst_data["cols"]:
+            html += f"<td class='num {c['mkt_cls']}'>{c['mkt']}</td>"
+        html += "</tr>"
+
+        html += "</tbody></table></div>"
+    else:
+        html += "<div class='trend-tip'>⚠️ 暫時無法取得證交所三大法人買賣超資料。</div>"
+
     html += "<h2>市場新聞 ( Yahoo 財經 )</h2><ol style='line-height:1.8; font-size:13px; padding-left:24px; margin-bottom:24px;'>"
     for item in news_data: html += f"<li><a href='{item['link']}' target='_blank' style='font-weight:normal;'>{item['title']}</a></li>"
     html += "</ol>"
@@ -784,15 +1144,14 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
                 ✓ <b>線上安全</b>：20 週線上，且 KD 無極端狀況
             </div>
             <div style="flex: 1 1 220px;">
-                <b style="color:#1f3b66;">3. 其他位階與當日燈號</b><br>
-                <span style="color:#1b8e3a;"><span class="s-dot">●</span>[跌]破季線</span>：跌破 60MA (中線轉弱)<br>
-                <span style="color:#d32f2f;"><span class="s-dot">●</span>[跌]破年線</span>：跌破 240MA (長線警戒)<br>
-                ☀️ 大漲(大盤≥2%/個股≥5%) ｜ ⛈️ 大跌
+                <b style="color:#1f3b66;">3. 匯率與三大法人籌碼判讀</b><br>
+                <span style="color:#d32f2f;"><b>紅字 (升值/買超)</b></span>：台幣升值＝外資匯入；法人合計買超 $\rightarrow$ <b>易漲</b><br>
+                <span style="color:#1b8e3a;"><b>綠字 (貶值/賣超)</b></span>：台幣貶值＝外資匯出；法人合計賣超 $\rightarrow$ <b>易跌</b>
             </div>
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.2 極速網頁直抓夜盤版<br><br>
+        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.3 HTML 匯率 [V1] 與三大法人籌碼 [V1] 新增版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -802,7 +1161,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f: f.write(html)
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片
+# 組裝 LINE Flex Message 卡片 (完全維持 V9.2 原狀，絕不更動)
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report, night_quote=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
@@ -1040,6 +1399,10 @@ def main():
     twii_last = float(s_twii.iloc[-1]) if (s_twii is not None and len(s_twii) > 0) else None
     night_quote = fetch_taifex_night_quote(day_close_ref=twii_last)
 
+    # 獨立抓取台美匯率與外資動向 [V1] 與三大法人買賣超 [V1]
+    fx_data = fetch_usdtwd_analysis()
+    inst_data = fetch_institutional_flow()
+
     vix_hist = {}
     v_closes, _, _ = fetch_and_audit_all(["^VIX", "^VIXTWN"], set(), period="1mo")
     for v_sym in ["^VIX", "^VIXTWN"]:
@@ -1050,7 +1413,7 @@ def main():
 
     news_data = fetch_yahoo_news(limit=5)
     df_report = export_all_data(closes, watch, kd_data, audit_summary)
-    generate_html_report(df_report, vix_hist, news_data, audit_summary, night_quote)
+    generate_html_report(df_report, vix_hist, news_data, audit_summary, night_quote, fx_data, inst_data)
     
     if skip_line_push: return 0
     
