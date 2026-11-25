@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.4 HTML 區塊重排與外資抓取修復版)
+美股／台股監控推播系統 (V9.5 台股 ETF 收盤價精準同步修復版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.4):
-1. [修復外資抓取] 修正證交所 BFI82U 單位名稱（「外資及陸資(不含外資自營商)」）被字串條件誤濾的問題，並相容民國/西元日期格式，確保外資買賣超數字 100% 準確。
-2. [HTML 區塊排序與編號] 依序調整為：
-   一、大盤與 VIX 狀況 (+/- 2%)
-   二、外資與投信買賣超（單位：億元） [V1]
-   三、台美匯率與外資動向 (USD/TWD) [V1]
-   四、個股追蹤清單 (支援短線/長線雙燈號)
-   五、其他位階警示
-   六、市場新聞 ( Yahoo 財經 )
-3. [零干擾保證] LINE 卡片 (build_flex_message)、所有大盤/個股計算及台指夜盤抓取邏輯完全維持原狀、一個字都不動。
+更新日誌 (V9.5):
+1. [修復台股 ETF 今日收盤] 解決 0050、0052(富邦科技)、00919、00929 在下午 13:35 收盤後因 yfinance 日線尚未更新且時間戳格式差異導致停留在昨日收盤的問題（同步修復 HTML 與 LINE 卡片中的 0050）。
+2. [延續 V9.4 完整功能] 保留「二、外資與投信買賣超 [V1]」、「三、台美匯率與外資動向 [V1]」及極速台指夜盤抓取邏輯。
 """
 
 import os
@@ -97,6 +90,17 @@ def shorten_name(name):
     if n == "台股大盤": return "台大盤"
     return n
 
+def get_latest_tw_trading_date_str():
+    """取得台灣最新已收盤交易日 (YYYY-MM-DD)：平日 13:35 後為今日，否則為前一交易日"""
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    now_tw = dt.datetime.now(tw_tz)
+    ref_dt = now_tw
+    if now_tw.weekday() < 5 and (now_tw.hour < 13 or (now_tw.hour == 13 and now_tw.minute < 35)):
+        ref_dt -= dt.timedelta(days=1)
+    while ref_dt.weekday() >= 5:
+        ref_dt -= dt.timedelta(days=1)
+    return ref_dt.strftime("%Y-%m-%d")
+
 def load_watchlist():
     bust_url = f"{SHEET_CSV_URL}&_t={int(time.time())}"
     cloud_rows = []
@@ -137,15 +141,20 @@ def load_watchlist():
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 台股雙源採集 & 台指夜盤極速直抓獨立函式 (完全維持原狀)
+# 台股雙源採集（強化 ETF 支援）& 台指夜盤極速直抓獨立函式
 # ---------------------------------------------------------------------------
 
 def fetch_tw_yahoo_quotes(tw_symbols):
+    """抓取台灣奇摩即時/盤後收盤報價（完整涵蓋普通股與 0050/0052/00919/00929 等 ETF）"""
     quotes = {}
     if not tw_symbols: return quotes
+    expected_tw_date = get_latest_tw_trading_date_str()
     try:
         url = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList"
-        params = {"fields": "symbol,price,regularMarketPreviousClose,regularMarketTime", "symbols": ",".join(tw_symbols)}
+        params = {
+            "fields": "symbol,price,regularMarketPrice,regularMarketPreviousClose,regularMarketTime",
+            "symbols": ",".join(tw_symbols)
+        }
         resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
         if resp.status_code == 200:
             data = resp.json()
@@ -153,24 +162,44 @@ def fetch_tw_yahoo_quotes(tw_symbols):
             tw_tz = dt.timezone(dt.timedelta(hours=8))
             for item in items:
                 sym = item.get("symbol")
-                price_raw = item.get("price")
+                price_raw = item.get("price") if item.get("price") not in (None, "-", "") else item.get("regularMarketPrice")
                 prev_raw = item.get("regularMarketPreviousClose")
                 mkt_time = item.get("regularMarketTime")
                 if sym and price_raw not in (None, "-", ""):
-                    price = float(str(price_raw).replace(",", ""))
-                    prev = float(str(prev_raw).replace(",", "")) if prev_raw not in (None, "-", "") else None
+                    try:
+                        price = float(str(price_raw).replace(",", ""))
+                    except:
+                        continue
+                    prev = None
+                    if prev_raw not in (None, "-", ""):
+                        try: prev = float(str(prev_raw).replace(",", ""))
+                        except: pass
+
                     date_str = None
                     if mkt_time:
                         try:
-                            if str(mkt_time).isdigit():
-                                ts = int(mkt_time)
+                            s_mt = str(mkt_time).strip()
+                            if s_mt.isdigit():
+                                ts = int(s_mt)
                                 if ts > 1e11: ts //= 1000
                                 date_str = dt.datetime.fromtimestamp(ts, tw_tz).strftime("%Y-%m-%d")
-                            else:
-                                date_str = str(mkt_time)[:10]
-                        except: pass
-                    if price > 0: quotes[sym] = {"price": price, "prev_close": prev, "date": date_str, "source": "台灣奇摩API"}
-    except Exception as e: print(f"[稽核提示] 台灣奇摩備援略過: {e}")
+                            elif len(s_mt) >= 10 and s_mt[4] == "-":
+                                date_str = s_mt[:10]
+                        except:
+                            pass
+                    # 若奇摩 API 未回傳標準日期字串，但已過台股收盤時間，則採用最新台股交易日
+                    if not date_str:
+                        date_str = expected_tw_date
+
+                    if price > 0:
+                        quotes[sym] = {
+                            "price": price,
+                            "prev_close": prev,
+                            "date": date_str,
+                            "source": "台灣奇摩API"
+                        }
+    except Exception as e:
+        print(f"[稽核提示] 台灣奇摩備援略過: {e}")
     return quotes
 
 def fetch_twse_official_quotes():
@@ -197,12 +226,7 @@ def fetch_twse_official_quotes():
     except Exception: pass
 
     if not latest_tw_date:
-        tw_tz = dt.timezone(dt.timedelta(hours=8))
-        now_tw = dt.datetime.now(tw_tz)
-        ref_dt = now_tw - dt.timedelta(days=1) if now_tw.hour < 14 else now_tw
-        while ref_dt.weekday() >= 5:
-            ref_dt -= dt.timedelta(days=1)
-        latest_tw_date = ref_dt.strftime("%Y-%m-%d")
+        latest_tw_date = get_latest_tw_trading_date_str()
 
     try:
         r2 = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12)
@@ -340,10 +364,6 @@ def fetch_taifex_night_quote(day_close_ref=None):
 # ---------------------------------------------------------------------------
 
 def fetch_usdtwd_analysis():
-    """
-    獨立抓取美元兌台幣匯率 (TWD=X)，以今日基準對照過去 7 個時間點：
-    較昨日(1D)、較前日(2D)、較1週前(5D)、較1月前(21D)、較1季前(63D)、較半年前(126D)、較1年前(252D)
-    """
     try:
         df = yf.download("TWD=X", period="2y", interval="1d", auto_adjust=False, progress=False)
         if df.empty:
@@ -359,7 +379,6 @@ def fetch_usdtwd_analysis():
         today_val = float(s.iloc[-1])
         today_date = s.index[-1].strftime("%m-%d")
 
-        # 計算連續台幣升值/貶值天數 (美元下跌=台幣升值，美元上漲=台幣貶值)
         streak_days = 0
         streak_dir = None
         for idx in range(len(s) - 1, 0, -1):
@@ -452,14 +471,10 @@ def fetch_usdtwd_analysis():
 # ---------------------------------------------------------------------------
 
 def fetch_institutional_flow():
-    """
-    獨立抓取台股三大法人（外資及陸資、投信）每日買賣超金額（換算為億元）：
-    回溯最近 60 個交易日，統計：今日、昨日、前日、近 1 週(5日)、近 1 月(20日)、近 1 季(60日)
-    """
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_tw = dt.datetime.now(tw_tz)
 
-    daily_records = []  # 由新到舊排序: [{"date": "YYYYMMDD", "foreign": float(億), "trust": float(億)}]
+    daily_records = []
     seen_dates = set()
 
     def _parse_num(s):
@@ -477,17 +492,14 @@ def fetch_institutional_flow():
 
     def _classify_inst(unit_name):
         n = str(unit_name or "").strip()
-        # 證交所 BFI82U 常見名稱：「外資及陸資(不含外資自營商)」、「外資自營商」、「投信」
-        # 若僅有「外資及陸資(不含外資自營商)」與「外資自營商」分列，僅加總「不含外資自營商」或未含自營商之總項
         if "外資" in n:
             if "外資自營商" in n and "不含" not in n:
-                return None  # 排除獨立列出的外資自營商細項，避免重複或混淆
+                return None
             return "foreign"
         if "投信" in n:
             return "trust"
         return None
 
-    # 來源 1：證交所 OpenAPI 取得最新一日數據
     try:
         r_open = requests.get("https://openapi.twse.com.tw/v1/fund/BFI82U", headers=HEADERS, timeout=10)
         if r_open.status_code == 200:
@@ -512,7 +524,6 @@ def fetch_institutional_flow():
     except Exception as e:
         print(f"[法人 OpenAPI 提示] {e}")
 
-    # 來源 2：回溯過去 95 個日曆日，補足近 60 個交易日（涵蓋近 1 季）
     for d_off in range(0, 96):
         if len(daily_records) >= 60:
             break
@@ -548,7 +559,6 @@ def fetch_institutional_flow():
     if not daily_records:
         return None
 
-    # 計算外資連續買超／賣超天數與累計金額（只針對外資動向說明）
     f_streak = 0
     f_dir = None
     f_streak_sum = 0.0
@@ -626,7 +636,7 @@ def fetch_institutional_flow():
     }
 
 # ---------------------------------------------------------------------------
-# 主抓取與自動稽核引擎 (完全維持原狀，絕不更動)
+# 主抓取與自動稽核引擎（強化台股 ETF 今日收盤強制校準）
 # ---------------------------------------------------------------------------
 
 def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
@@ -636,6 +646,7 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
     tw_list = list(tw_symbols_set)
     tw_yahoo_map = fetch_tw_yahoo_quotes(tw_list)
     twse_map = fetch_twse_official_quotes()
+    expected_tw_date = get_latest_tw_trading_date_str()
 
     for sym in symbols:
         try:
@@ -654,13 +665,20 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
             yf_last_price = float(df["Close"].iloc[-1])
 
             alt_info = None
-            if sym in tw_symbols_set: alt_info = tw_yahoo_map.get(sym) or twse_map.get(sym)
+            if sym in tw_symbols_set:
+                alt_info = tw_yahoo_map.get(sym) or twse_map.get(sym)
             if not alt_info:
                 try:
                     fi = yf.Ticker(sym).fast_info
                     lp = fi.get("lastPrice") or fi.get("regularMarketPrice")
                     pc = fi.get("previousClose")
-                    if lp and float(lp) > 0: alt_info = {"price": float(lp), "prev_close": float(pc) if pc else None, "date": None, "source": "fast_info"}
+                    if lp and float(lp) > 0:
+                        alt_info = {
+                            "price": float(lp),
+                            "prev_close": float(pc) if pc else None,
+                            "date": expected_tw_date if sym in tw_symbols_set else None,
+                            "source": "fast_info"
+                        }
                 except: pass
 
             if alt_info and alt_info["price"] > 0:
@@ -668,7 +686,16 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                 alt_d = alt_info.get("date")
                 alt_prev = alt_info.get("prev_close")
 
-                if alt_d and alt_d > yf_last_date:
+                # 針對台股（含 0050/0052/00919/00929 等 ETF），若 yfinance 尚未更新至最新台股交易日，強制補入今日收盤
+                if sym in tw_symbols_set and yf_last_date < expected_tw_date:
+                    target_d = alt_d if (alt_d and alt_d > yf_last_date) else expected_tw_date
+                    new_ts = pd.Timestamp(target_d)
+                    if alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev > 0.002:
+                        df.loc[df.index[-1], "Close"] = alt_prev
+                    df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
+                    corrected_count += 1
+                    print(f"[自動校正] {sym} 補入 {alt_info['source']} 最新收盤 ({target_d}): {alt_p}")
+                elif alt_d and alt_d > yf_last_date:
                     new_ts = pd.Timestamp(alt_d)
                     if alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev > 0.002: df.loc[df.index[-1], "Close"] = alt_prev
                     df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
@@ -679,9 +706,10 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                     new_ts = pd.Timestamp(tw_today if tw_today > yf_last_date else (df.index[-1] + pd.Timedelta(days=1)))
                     df.loc[new_ts] = {"High": alt_p, "Low": alt_p, "Close": alt_p}
                     corrected_count += 1
-                elif alt_d == yf_last_date and abs(alt_p - yf_last_price) / yf_last_price > 0.003:
+                elif (alt_d == yf_last_date or sym in tw_symbols_set) and abs(alt_p - yf_last_price) / yf_last_price > 0.002:
                     df.loc[df.index[-1], "Close"] = alt_p
                     corrected_count += 1
+                    print(f"[自動校正] {sym} 更新當日收盤價 ({yf_last_date}): {alt_p}")
 
             closes[sym] = df["Close"]
             kd_data[sym] = kd_timeframes(df)
@@ -1003,25 +1031,21 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             txt = f"{'+' if val > 0 else ''}{val:,.1f}"
             return f'<td class="num {cls}">{"<b>" + txt + "</b>" if bold else txt}</td>'
 
-        # 第 1 列：外資
         html += "<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>外資</b></td>"
         for c in inst_data["cols"]:
             html += _fmt_inst_td(c["foreign"])
         html += "</tr>"
 
-        # 第 2 列：投信
         html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>投信</b></td>"
         for c in inst_data["cols"]:
             html += _fmt_inst_td(c["trust"])
         html += "</tr>"
 
-        # 第 3 列：合計
         html += "<tr><td class='num idx freeze-idx'>3</td><td class='freeze-name'><b>合計</b></td>"
         for c in inst_data["cols"]:
             html += _fmt_inst_td(c["total"], bold=True)
         html += "</tr>"
 
-        # 第 4 列：股市漲跌
         html += "<tr><td class='num idx freeze-idx'>4</td><td class='freeze-name'><b>股市漲跌</b></td>"
         for c in inst_data["cols"]:
             html += f"<td class='num {c['mkt_cls']}'>{c['mkt']}</td>"
@@ -1043,25 +1067,21 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<th class='num'>{c['label']}</th>"
         html += "</tr></thead><tbody>"
 
-        # 第 1 列：當時匯率
         html += f"<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>當時匯率</b></td><td class='num'><b>{fx_data['today_rate']}</b></td>"
         for c in fx_data["cols"]:
             html += f"<td class='num'>{c['rate']}</td>"
         html += "</tr>"
 
-        # 第 2 列：台幣升貶
         html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>台幣升貶</b></td><td class='num mute'>—</td>"
         for c in fx_data["cols"]:
             html += f"<td class='num {c['cls']}'>{c['twd_chg']}</td>"
         html += "</tr>"
 
-        # 第 3 列：外資動向
         html += "<tr><td class='num idx freeze-idx'>3</td><td class='freeze-name'><b>外資動向</b></td><td class='num mute'>—</td>"
         for c in fx_data["cols"]:
             html += f"<td class='num {c['cls']}'>{c['flow']}</td>"
         html += "</tr>"
 
-        # 第 4 列：股市漲跌
         html += "<tr><td class='num idx freeze-idx'>4</td><td class='freeze-name'><b>股市漲跌</b></td><td class='num mute'>—</td>"
         for c in fx_data["cols"]:
             html += f"<td class='num {c['cls']}'>{c['mkt']}</td>"
@@ -1184,7 +1204,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.4 HTML 區塊重排與外資抓取修復版<br><br>
+        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.5 台股 ETF 收盤價精準同步修復版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -1243,7 +1263,6 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     if add_sec1_item("台大盤", "^TWII", s_twii, True):
         core_items.append({"name": "台大盤", "yf": "^TWII", "last": float(s_twii.iloc[-1]), "ma20w": weekly_ma(s_twii, 20)})
 
-    # 緊接在「台大盤」下方插入「台指夜」（含保底顯示，確保任何時段都看得到）
     if night_quote and night_quote.get("price", 0) > 0:
         np = night_quote["price"]
         ndiff = night_quote["diff"]
@@ -1431,7 +1450,6 @@ def main():
     twii_last = float(s_twii.iloc[-1]) if (s_twii is not None and len(s_twii) > 0) else None
     night_quote = fetch_taifex_night_quote(day_close_ref=twii_last)
 
-    # 獨立抓取台美匯率與外資動向 [V1] 與三大法人買賣超 [V1]
     fx_data = fetch_usdtwd_analysis()
     inst_data = fetch_institutional_flow()
 
