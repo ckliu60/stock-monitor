@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.7 Yahoo Chart API 台股/ETF 實價精準同步與防呆版)
+美股／台股監控推播系統 (V9.8 期交所夜盤 MIS 官方直抓版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.7):
-1. [排除 GitHub Actions 執行中斷] 移除會導致 curl_cffi 憑證路徑報錯 (exit code 1) 的空白環境變數設定，並加入證交所 SSL 相容處理。
-2. [台股與 ETF 實價精準同步] 新增 Yahoo Finance Chart API (v8/finance/chart) 作為台股與 00 開頭 ETF (0050、0052、00919、00929) 主力收盤來源，同步修正 HTML 與 LINE 卡片價格與漲跌幅。
-3. [真實交易日期防呆鎖] 嚴格比對 API 回傳之真實交易日期，絕不將昨日舊收盤價硬貼今日日期，杜絕漲跌幅歸零 (0.00 / -0.00)。
-4. [完整保留既有功能] 完整保留「二、外資與投信買賣超 [V1]」、「三、台美匯率與外資動向 [V1]」及極速台指夜盤抓取邏輯。
+更新日誌 (V9.8):
+1. [確保早上 06:30 抓到台指夜盤] 新增「台灣期交所官方夜盤 MIS (MarketType=1)」作為第一主力來源，完整保留清晨 05:00 夜盤最終收盤價與漲跌幅至下午 15:00；並修正台灣奇摩期貨網頁 (WTX&) 數字格式解析作為第二備援。
+2. [完整保留 V9.7 功能] 保留 Yahoo Chart API 台股/ETF (0050/0052/00919/00929) 實價同步、「二、外資與投信買賣超 [V1]」及「三、台美匯率與外資動向 [V1]」。
 """
 
 import os
@@ -144,13 +142,12 @@ def load_watchlist():
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 台股與 ETF 精準多源採集（Yahoo Chart API 主力 + 奇摩 + 證交所）& 台指夜盤
+# 台股與 ETF 精準多源採集 & 台指夜盤官方直抓獨立函式
 # ---------------------------------------------------------------------------
 
 def fetch_yahoo_chart_quotes(tw_symbols):
     """
-    【主力引擎】透過 Yahoo Finance v8/finance/chart 抓取台股與 ETF 近 5 日行情與即時盤後 meta，
-    回傳帶有「真實交易日期 (YYYY-MM-DD)」、「今日收盤價」與「前日收盤價」的精準字典。
+    【主力引擎】透過 Yahoo Finance v8/finance/chart 抓取台股與 ETF 近 5 日行情與即時盤後 meta。
     """
     quotes = {}
     if not tw_symbols:
@@ -182,7 +179,7 @@ def fetch_yahoo_chart_quotes(tw_symbols):
                 highs_arr = q_block.get("high") or []
                 lows_arr = q_block.get("low") or []
 
-                daily_map = {}  # {"YYYY-MM-DD": {"close": float, "high": float, "low": float}}
+                daily_map = {}
                 for ts, c_v, h_v, l_v in zip(timestamps, closes_arr, highs_arr, lows_arr):
                     if ts is None or c_v is None:
                         continue
@@ -197,7 +194,6 @@ def fetch_yahoo_chart_quotes(tw_symbols):
                     except Exception:
                         continue
 
-                # 檢查 meta.regularMarketPrice 與 meta.regularMarketTime
                 rm_p = meta.get("regularMarketPrice")
                 rm_t = meta.get("regularMarketTime")
                 if rm_p is not None and rm_t is not None:
@@ -252,7 +248,7 @@ def fetch_yahoo_chart_quotes(tw_symbols):
     return quotes
 
 def fetch_tw_yahoo_quotes(tw_symbols):
-    """備援引擎 1：台灣奇摩股市 API（僅採信帶有明確時間戳記的有效報價）"""
+    """備援引擎 1：台灣奇摩股市 API"""
     quotes = {}
     if not tw_symbols: return quotes
     try:
@@ -296,7 +292,6 @@ def fetch_tw_yahoo_quotes(tw_symbols):
                         except Exception:
                             pass
 
-                    # 防呆鎖：只有明確解析出日期字串才納入，絕不硬猜今日日期
                     if price > 0 and date_str:
                         quotes[sym] = {
                             "price": price,
@@ -309,7 +304,7 @@ def fetch_tw_yahoo_quotes(tw_symbols):
     return quotes
 
 def fetch_twse_official_quotes(tw_symbols=None):
-    """備援引擎 2：證交所官方 OpenAPI（加入 verify=False 相容雲端 SSL 環境）"""
+    """備援引擎 2：證交所官方 OpenAPI"""
     twse_map = {}
     latest_tw_date = None
     try:
@@ -335,7 +330,6 @@ def fetch_twse_official_quotes(tw_symbols=None):
     except Exception as e:
         print(f"[證交所提示] STOCK_DAY_ALL 略過: {e}")
 
-    # 針對 STOCK_DAY_ALL 未收錄的 00 開頭 ETF，查詢證交所 STOCK_DAY 官方月行情接口
     if tw_symbols:
         tw_tz = dt.timezone(dt.timedelta(hours=8))
         ym_str = dt.datetime.now(tw_tz).strftime("%Y%m") + "01"
@@ -406,18 +400,125 @@ def fetch_twse_official_quotes(tw_symbols=None):
 
 def fetch_taifex_night_quote(day_close_ref=None):
     """
-    【獨立函式】極速直抓台指期夜盤（清晨 05:00 收盤）現成數值，不下載 K 線、不影響其他指數。
+    【獨立函式 V9.8】確保早上 06:30 穩定抓取昨夜（清晨 05:00 收盤）台指期夜盤數據：
+    1. 第一主力：台灣期交所官方夜盤 MIS API (mis.taifex.com.tw, MarketType="1", CID="TXF")，
+       清晨 05:00 收盤後持續鎖定保留至下午 15:00，完全不受 05:00~08:45 盤前清空影響。
+    2. 第二備援：台灣奇摩期貨網頁 (https://tw.stock.yahoo.com/future/WTX%26)，
+       支援台灣奇摩無 raw 包裝之 JSON 欄位格式。
+    3. 第三備援：台灣奇摩 StockServices API (WTX&)。
     """
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_tw = dt.datetime.now(tw_tz)
     date_label = now_tw.strftime("%m-%d")
 
     def _to_float(val):
-        if val in (None, "-", "", "NaN"): return None
-        try: return float(str(val).replace(",", "").strip())
+        if val in (None, "-", "", "NaN", "--"): return None
+        try: return float(str(val).replace(",", "").replace("%", "").strip())
         except Exception: return None
 
-    # 來源 1：台灣奇摩新版期貨 API (WTX& 台指期近月)
+    # 來源 1：台灣期交所官方夜盤專用頻道 (MarketType="1" 盤後交易時段, CID="TXF" 臺股期貨)
+    try:
+        mis_url = "https://mis.taifex.com.tw/futures/api/getQuoteList"
+        mis_headers = {
+            "User-Agent": HEADERS["User-Agent"],
+            "Content-Type": "application/json;charset=UTF-8",
+            "Referer": "https://mis.taifex.com.tw/futures/AfterHoursSession/EquityIndices/FuturesDomestic/",
+            "Origin": "https://mis.taifex.com.tw"
+        }
+        payload = {
+            "MarketType": "1",
+            "SymbolType": "F",
+            "KindID": "1",
+            "CID": "TXF",
+            "ExpireMonth": "",
+            "RowSize": "全部",
+            "PageNo": "",
+            "SortColumn": "",
+            "AscDesc": "A"
+        }
+        r_mis = requests.post(mis_url, json=payload, headers=mis_headers, timeout=12, verify=False)
+        if r_mis.status_code == 200:
+            j_mis = r_mis.json()
+            quote_list = (j_mis.get("RtData") or {}).get("QuoteList") or []
+            for q in quote_list:
+                sym_id = str(q.get("SymbolID") or "").strip()
+                disp_name = str(q.get("DispCName") or "").strip()
+                # 排除現貨指標 (-S) 與跨月價差單 (/)，直接锁定近月臺股期貨主合約
+                if not sym_id or "-S" in sym_id or "/" in sym_id or "現貨" in disp_name or "價差" in disp_name:
+                    continue
+
+                last_p = _to_float(q.get("CLastPrice"))
+                ref_p = _to_float(q.get("CReferencePrice"))
+                diff_v = _to_float(q.get("CDiff"))
+                pct_v = _to_float(q.get("CDiffRate"))
+                c_date = str(q.get("CDate") or "").strip()
+                if len(c_date) == 8 and c_date.isdigit():
+                    date_label = f"{c_date[4:6]}-{c_date[6:8]}"
+
+                if last_p and last_p > 0:
+                    base = ref_p if (ref_p and ref_p > 0) else (day_close_ref if (day_close_ref and day_close_ref > 0) else last_p)
+                    if diff_v is None:
+                        diff_v = (last_p - base) if base != last_p else 0.0
+                    if pct_v is None:
+                        pct_v = (diff_v / base * 100.0) if base > 0 else 0.0
+                    print(f"[台指夜盤] 期交所夜盤 MIS ({sym_id}) 取得: {last_p} ({diff_v:+.0f}, {pct_v:+.2f}%)")
+                    return {"price": last_p, "diff": diff_v, "pct": pct_v, "date": date_label, "source": "期交所夜盤MIS"}
+                break
+    except Exception as e:
+        print(f"[夜盤提示] 期交所 MIS 查詢略過: {e}")
+
+    # 來源 2：直接讀取台灣奇摩期貨網頁 (https://tw.stock.yahoo.com/future/WTX%26)，鎖定 WTX& 區塊解析
+    def _extract_yahoo_num(txt_block, field_names):
+        for fn in field_names:
+            m1 = re.search(rf'"{fn}"\s*:\s*\{{\s*"raw"\s*:\s*([-0-9.]+)', txt_block)
+            if m1:
+                v = _to_float(m1.group(1))
+                if v is not None:
+                    return v
+            m2 = re.search(rf'"{fn}"\s*:\s*"?([-0-9.,]+)"?', txt_block)
+            if m2:
+                v = _to_float(m2.group(1))
+                if v is not None:
+                    return v
+        return None
+
+    try:
+        r_web = requests.get("https://tw.stock.yahoo.com/future/WTX%26", headers=HEADERS, timeout=12)
+        if r_web.status_code == 200:
+            txt = r_web.text
+            idx_wtx = txt.find('"WTX&"')
+            sub_txt = txt[max(0, idx_wtx - 600): idx_wtx + 4000] if idx_wtx != -1 else txt
+
+            p_cur = _extract_yahoo_num(sub_txt, ["regularMarketPrice", "price"])
+            p_prev = _extract_yahoo_num(sub_txt, ["regularMarketPreviousClose", "previousClose"])
+            chg_cur = _extract_yahoo_num(sub_txt, ["regularMarketChange", "change"])
+
+            if p_cur and p_cur > 0:
+                if chg_cur is not None:
+                    diff = chg_cur
+                    base = p_cur - diff
+                elif p_prev and p_prev > 0 and abs(p_cur - p_prev) > 0.1:
+                    base = p_prev
+                    diff = p_cur - base
+                elif day_close_ref and day_close_ref > 0:
+                    base = day_close_ref
+                    diff = p_cur - base
+                else:
+                    diff, base = 0.0, p_cur
+                pct_val = (diff / base * 100.0) if base > 0 else 0.0
+                print(f"[台指夜盤] 奇摩期貨網頁取得: {p_cur} ({diff:+.0f})")
+                return {"price": p_cur, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨網頁"}
+
+            if p_prev and p_prev > 0:
+                base = day_close_ref if (day_close_ref and day_close_ref > 0) else p_prev
+                diff = (p_prev - base) if (day_close_ref and day_close_ref > 0) else 0.0
+                pct_val = (diff / base * 100.0) if base > 0 else 0.0
+                print(f"[台指夜盤] 奇摩期貨網頁盤前結算欄取得: {p_prev} ({diff:+.0f})")
+                return {"price": p_prev, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨網頁(盤後結算)"}
+    except Exception as e:
+        print(f"[夜盤提示] 奇摩網頁直抓略過: {e}")
+
+    # 來源 3：台灣奇摩新版期貨 API (WTX&)
     try:
         url = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList"
         params = {
@@ -458,7 +559,7 @@ def fetch_taifex_night_quote(day_close_ref=None):
                     else:
                         diff, base = 0.0, p_cur
                     pct_val = (diff / base * 100.0) if base > 0 else 0.0
-                    print(f"[台指夜盤] 奇摩 API 即時/盤後欄取得: {p_cur} ({diff:+.0f})")
+                    print(f"[台指夜盤] 奇摩 API 取得: {p_cur} ({diff:+.0f})")
                     return {"price": p_cur, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨API"}
 
                 if (not p_cur or p_cur <= 0) and p_prev and p_prev > 0:
@@ -469,44 +570,6 @@ def fetch_taifex_night_quote(day_close_ref=None):
                     return {"price": p_prev, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨API(盤後結算)"}
     except Exception as e:
         print(f"[夜盤提示] 奇摩 API 查詢略過: {e}")
-
-    # 來源 2：直接讀取台灣奇摩期貨網頁現成數字 (https://tw.stock.yahoo.com/future/WTX%26)
-    try:
-        r_web = requests.get("https://tw.stock.yahoo.com/future/WTX%26", headers=HEADERS, timeout=10)
-        if r_web.status_code == 200:
-            txt = r_web.text
-            m_price = re.search(r'"(?:regularMarketPrice|price)"\s*:\s*\{\s*"raw"\s*:\s*([0-9.]+)', txt)
-            m_chg = re.search(r'"(?:regularMarketChange|change)"\s*:\s*\{\s*"raw"\s*:\s*([-0-9.]+)', txt)
-            m_prev = re.search(r'"regularMarketPreviousClose"\s*:\s*\{\s*"raw"\s*:\s*([0-9.]+)', txt)
-
-            p_cur = float(m_price.group(1)) if m_price else None
-            p_prev = float(m_prev.group(1)) if m_prev else None
-            chg_cur = float(m_chg.group(1)) if m_chg else None
-
-            if p_cur and p_cur > 0:
-                if chg_cur is not None:
-                    diff = chg_cur
-                    base = p_cur - diff
-                elif p_prev and p_prev > 0:
-                    base = p_prev
-                    diff = p_cur - base
-                elif day_close_ref and day_close_ref > 0:
-                    base = day_close_ref
-                    diff = p_cur - base
-                else:
-                    diff, base = 0.0, p_cur
-                pct_val = (diff / base * 100.0) if base > 0 else 0.0
-                print(f"[台指夜盤] 奇摩期貨網頁取得: {p_cur} ({diff:+.0f})")
-                return {"price": p_cur, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨網頁"}
-
-            if (not p_cur or p_cur <= 0) and p_prev and p_prev > 0:
-                base = day_close_ref if (day_close_ref and day_close_ref > 0) else p_prev
-                diff = (p_prev - base) if (day_close_ref and day_close_ref > 0) else 0.0
-                pct_val = (diff / base * 100.0) if base > 0 else 0.0
-                print(f"[台指夜盤] 奇摩期貨網頁盤前結算欄取得: {p_prev} ({diff:+.0f})")
-                return {"price": p_prev, "diff": diff, "pct": pct_val, "date": date_label, "source": "奇摩期貨網頁(盤後結算)"}
-    except Exception as e:
-        print(f"[夜盤提示] 奇摩網頁直抓略過: {e}")
 
     print("[夜盤警告] 無法取得台指夜盤報價，將顯示暫無盤後。")
     return None
@@ -819,7 +882,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
             yf_last_date = df.index[-1].strftime("%Y-%m-%d")
             yf_last_price = float(df["Close"].iloc[-1])
 
-            # 僅針對台股與台股 ETF 進行多源比對，且只採信帶有明確真實交易日期的來源
             alt_info = None
             if sym in tw_symbols_set:
                 candidates = [
@@ -829,7 +891,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                 ]
                 valid_cands = [c for c in candidates if c and c.get("price", 0) > 0 and c.get("date")]
                 if valid_cands:
-                    # 優先挑選資料日期最新者；同日期時優先採用 YahooChartAPI / 證交所
                     valid_cands.sort(key=lambda x: x["date"], reverse=True)
                     alt_info = valid_cands[0]
 
@@ -840,7 +901,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                 alt_h = float(alt_info.get("high") or alt_p)
                 alt_l = float(alt_info.get("low") or alt_p)
 
-                # 防呆鎖 1：只有當 API 真實交易日期確實大於歷史日線最後一天，才新增一天
                 if alt_d > yf_last_date:
                     new_ts = pd.Timestamp(alt_d)
                     if alt_prev and alt_prev > 0 and abs(yf_last_price - alt_prev) / alt_prev > 0.001:
@@ -848,7 +908,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                     df.loc[new_ts] = {"High": alt_h, "Low": alt_l, "Close": alt_p}
                     corrected_count += 1
                     print(f"[自動校正] {sym} 補入 {alt_info['source']} 最新收盤 ({alt_d}): {alt_p} (前收: {alt_prev})")
-                # 防呆鎖 2：若日期相同，僅微調更新當日最終收盤價，絕不重複新增列
                 elif alt_d == yf_last_date:
                     if abs(alt_p - yf_last_price) / yf_last_price > 0.0005:
                         df.loc[df.index[-1], "Close"] = alt_p
@@ -1362,7 +1421,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：Yahoo Finance / 台灣奇摩股市 / 期交所 / 證交所 ｜ 報表產生器：V9.7 Yahoo Chart API 台股/ETF 實價精準同步與防呆版<br><br>
+        資料來源：台灣期交所 MIS / Yahoo Finance / 台灣奇摩股市 / 證交所 ｜ 報表產生器：V9.8 期交所夜盤 MIS 官方直抓版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -1372,7 +1431,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f: f.write(html)
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片 (完全維持原狀，自動帶入最新收盤與漲跌幅)
+# 組裝 LINE Flex Message 卡片 (完全維持原狀，自動帶入最新收盤與夜盤)
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report, night_quote=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
