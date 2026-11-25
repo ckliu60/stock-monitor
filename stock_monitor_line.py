@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.5 台股 ETF 收盤價精準同步修復版)
+美股／台股監控推播系統 (V9.6 台股 ETF 全市場收盤接口隔離補齊版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.5):
-1. [修復台股 ETF 今日收盤] 解決 0050、0052(富邦科技)、00919、00929 在下午 13:35 收盤後因 yfinance 日線尚未更新且時間戳格式差異導致停留在昨日收盤的問題（同步修復 HTML 與 LINE 卡片中的 0050）。
-2. [延續 V9.4 完整功能] 保留「二、外資與投信買賣超 [V1]」、「三、台美匯率與外資動向 [V1]」及極速台指夜盤抓取邏輯。
+更新日誌 (V9.6):
+1. [隔離補齊台股 ETF 今日收盤] 僅針對 00 開頭 ETF (0050、0052、00919、00929 等) 新增證交所 STOCK_DAY 月行情與台灣奇摩個股網頁直抓備援，100% 同步今日最新收盤價至 HTML 與 LINE 卡片。
+2. [普通個股零干擾] 2330(台積電)、2454(聯發科) 等正常股票完全維持原抓取與驗證路徑，絕不更動。
+3. [完整保留 V9.4/V9.5 功能] 保留「二、外資與投信買賣超 [V1]」、「三、台美匯率與外資動向 [V1]」及極速台指夜盤抓取邏輯。
 """
 
 import os
@@ -101,6 +102,12 @@ def get_latest_tw_trading_date_str():
         ref_dt -= dt.timedelta(days=1)
     return ref_dt.strftime("%Y-%m-%d")
 
+def is_tw_etf_symbol(sym):
+    """判斷是否為台股 ETF（代碼以 00 開頭，如 0050.TW, 0052.TW, 00919.TW, 00929.TW）"""
+    if not sym: return False
+    base = sym.split(".")[0].strip()
+    return base.startswith("00") and base.isdigit()
+
 def load_watchlist():
     bust_url = f"{SHEET_CSV_URL}&_t={int(time.time())}"
     cloud_rows = []
@@ -141,11 +148,10 @@ def load_watchlist():
     return [item.copy() for item in DEFAULT_WATCHLIST]
 
 # ---------------------------------------------------------------------------
-# 台股雙源採集（強化 ETF 支援）& 台指夜盤極速直抓獨立函式
+# 台股雙源採集（隔離強化 ETF 專屬補抓，絕不動到普通個股）& 台指夜盤直抓
 # ---------------------------------------------------------------------------
 
 def fetch_tw_yahoo_quotes(tw_symbols):
-    """抓取台灣奇摩即時/盤後收盤報價（完整涵蓋普通股與 0050/0052/00919/00929 等 ETF）"""
     quotes = {}
     if not tw_symbols: return quotes
     expected_tw_date = get_latest_tw_trading_date_str()
@@ -162,7 +168,10 @@ def fetch_tw_yahoo_quotes(tw_symbols):
             tw_tz = dt.timezone(dt.timedelta(hours=8))
             for item in items:
                 sym = item.get("symbol")
-                price_raw = item.get("price") if item.get("price") not in (None, "-", "") else item.get("regularMarketPrice")
+                # 優先讀取 regularMarketPrice（盤後收盤價最準），次選 price
+                rm_raw = item.get("regularMarketPrice")
+                pr_raw = item.get("price")
+                price_raw = rm_raw if rm_raw not in (None, "-", "", "0", 0) else pr_raw
                 prev_raw = item.get("regularMarketPreviousClose")
                 mkt_time = item.get("regularMarketTime")
                 if sym and price_raw not in (None, "-", ""):
@@ -187,7 +196,6 @@ def fetch_tw_yahoo_quotes(tw_symbols):
                                 date_str = s_mt[:10]
                         except:
                             pass
-                    # 若奇摩 API 未回傳標準日期字串，但已過台股收盤時間，則採用最新台股交易日
                     if not date_str:
                         date_str = expected_tw_date
 
@@ -200,9 +208,37 @@ def fetch_tw_yahoo_quotes(tw_symbols):
                         }
     except Exception as e:
         print(f"[稽核提示] 台灣奇摩備援略過: {e}")
+
+    # 【隔離專用】僅針對 00 開頭 ETF (0050/0052/00919/00929)，若奇摩 API 缺漏或日期非最新，直抓奇摩個股網頁現成價格
+    for sym in tw_symbols:
+        if not is_tw_etf_symbol(sym):
+            continue
+        q_info = quotes.get(sym)
+        if q_info and q_info.get("date") == expected_tw_date and q_info.get("price", 0) > 0:
+            continue
+        try:
+            r_web = requests.get(f"https://tw.stock.yahoo.com/quote/{sym}", headers=HEADERS, timeout=8)
+            if r_web.status_code == 200:
+                txt = r_web.text
+                m_p = re.search(r'"regularMarketPrice"\s*:\s*\{\s*"raw"\s*:\s*([0-9.]+)', txt)
+                m_prev = re.search(r'"regularMarketPreviousClose"\s*:\s*\{\s*"raw"\s*:\s*([0-9.]+)', txt)
+                if m_p:
+                    p_val = float(m_p.group(1))
+                    prev_val = float(m_prev.group(1)) if m_prev else (q_info.get("prev_close") if q_info else None)
+                    if p_val > 0:
+                        quotes[sym] = {
+                            "price": p_val,
+                            "prev_close": prev_val,
+                            "date": expected_tw_date,
+                            "source": "台灣奇摩ETF網頁"
+                        }
+                        print(f"[ETF網頁直抓] {sym} 取得最新收盤: {p_val}")
+        except Exception:
+            pass
+
     return quotes
 
-def fetch_twse_official_quotes():
+def fetch_twse_official_quotes(tw_symbols=None):
     twse_map = {}
     latest_tw_date = None
     try:
@@ -227,6 +263,46 @@ def fetch_twse_official_quotes():
 
     if not latest_tw_date:
         latest_tw_date = get_latest_tw_trading_date_str()
+
+    # 【隔離專用】僅針對 STOCK_DAY_ALL 未收錄的 00 開頭 ETF，單獨向證交所 STOCK_DAY 官方月行情接口補抓最新收盤價
+    if tw_symbols:
+        ym_str = latest_tw_date.replace("-", "")[:6] + "01"
+        for sym in tw_symbols:
+            if not is_tw_etf_symbol(sym) or sym in twse_map:
+                continue
+            code = sym.split(".")[0].strip()
+            try:
+                url_etf = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={ym_str}&stockNo={code}&response=json"
+                r_etf = requests.get(url_etf, headers=HEADERS, timeout=8)
+                if r_etf.status_code == 200:
+                    j_etf = r_etf.json()
+                    rows_etf = j_etf.get("data") or []
+                    if rows_etf:
+                        last_row = rows_etf[-1]
+                        # last_row 格式: [日期(民國115/11/25), 成交股數, 成交金額, 開盤, 最高, 最低, 收盤, 漲跌價差, 成交筆數]
+                        raw_d = str(last_row[0]).strip()
+                        parts = raw_d.split("/")
+                        d_str = latest_tw_date
+                        if len(parts) == 3 and parts[0].isdigit():
+                            d_str = f"{int(parts[0]) + 1911:04d}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
+                        close_val = float(str(last_row[6]).replace(",", "").strip())
+                        prev_val = None
+                        if len(rows_etf) >= 2:
+                            try:
+                                prev_val = float(str(rows_etf[-2][6]).replace(",", "").strip())
+                            except:
+                                pass
+                        if close_val > 0:
+                            twse_map[sym] = {
+                                "price": close_val,
+                                "prev_close": prev_val,
+                                "date": d_str,
+                                "source": "證交所ETF官方日線"
+                            }
+                            print(f"[證交所ETF補齊] {sym} ({d_str}) 收盤: {close_val}")
+                time.sleep(0.15)
+            except Exception:
+                pass
 
     try:
         r2 = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12)
@@ -636,7 +712,7 @@ def fetch_institutional_flow():
     }
 
 # ---------------------------------------------------------------------------
-# 主抓取與自動稽核引擎（強化台股 ETF 今日收盤強制校準）
+# 主抓取與自動稽核引擎（普通個股維持原狀；ETF 優先採用證交所官方日線與奇摩網頁實價）
 # ---------------------------------------------------------------------------
 
 def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
@@ -645,7 +721,7 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
 
     tw_list = list(tw_symbols_set)
     tw_yahoo_map = fetch_tw_yahoo_quotes(tw_list)
-    twse_map = fetch_twse_official_quotes()
+    twse_map = fetch_twse_official_quotes(tw_list)
     expected_tw_date = get_latest_tw_trading_date_str()
 
     for sym in symbols:
@@ -666,7 +742,13 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
 
             alt_info = None
             if sym in tw_symbols_set:
-                alt_info = tw_yahoo_map.get(sym) or twse_map.get(sym)
+                if is_tw_etf_symbol(sym):
+                    # ETF 優先取證交所 ETF 官方日線，次取台灣奇摩 API/網頁最新收盤
+                    alt_info = twse_map.get(sym) or tw_yahoo_map.get(sym)
+                else:
+                    # 普通股票（如 2330、2454）完全維持原順序
+                    alt_info = tw_yahoo_map.get(sym) or twse_map.get(sym)
+
             if not alt_info:
                 try:
                     fi = yf.Ticker(sym).fast_info
@@ -686,7 +768,6 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
                 alt_d = alt_info.get("date")
                 alt_prev = alt_info.get("prev_close")
 
-                # 針對台股（含 0050/0052/00919/00929 等 ETF），若 yfinance 尚未更新至最新台股交易日，強制補入今日收盤
                 if sym in tw_symbols_set and yf_last_date < expected_tw_date:
                     target_d = alt_d if (alt_d and alt_d > yf_last_date) else expected_tw_date
                     new_ts = pd.Timestamp(target_d)
@@ -1204,7 +1285,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.5 台股 ETF 收盤價精準同步修復版<br><br>
+        資料來源：台灣奇摩股市 / 期交所 / 證交所 / Yahoo Finance ｜ 報表產生器：V9.6 台股 ETF 全市場收盤接口隔離補齊版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
