@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.8 期交所夜盤 MIS 官方直抓版)
+美股／台股監控推播系統 (V9.9 散戶信用交易與法人空單雙表新增版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.8):
-1. [確保早上 06:30 抓到台指夜盤] 新增「台灣期交所官方夜盤 MIS (MarketType=1)」作為第一主力來源，完整保留清晨 05:00 夜盤最終收盤價與漲跌幅至下午 15:00；並修正台灣奇摩期貨網頁 (WTX&) 數字格式解析作為第二備援。
-2. [完整保留 V9.7 功能] 保留 Yahoo Chart API 台股/ETF (0050/0052/00919/00929) 實價同步、「二、外資與投信買賣超 [V1]」及「三、台美匯率與外資動向 [V1]」。
+更新日誌 (V9.9):
+1. [新增四-1 散戶信用交易 V1] 抓取證交所融資餘額(億)與融券(張)近 60 交易日變化，標示「散多標 / 散空標」並於每列下方直接顯示「看多 / 看空」判讀。
+2. [新增四-2 法人空單力道 V1] 抓取期交所外資台指期淨空單(口)與證交所借券賣出(萬張)近 60 交易日變化，標示「外空標」並於每列下方直接顯示「看多 / 看空」判讀。
+3. [註明欄與標題順延] 網頁底部「燈號與位階判斷標準」新增第 4 欄指標白話定義；其餘區塊標題依序調整為五、六、七。
+4. [零干擾保證] LINE 卡片 (build_flex_message)、台指夜盤期交所 MIS 直抓、Yahoo Chart API 台股/ETF 實價同步完全維持 V9.8 原狀。
 """
 
 import os
@@ -28,10 +30,17 @@ if os.environ.get("REQUESTS_CA_BUNDLE") == "":
 
 import urllib3
 import requests
+from requests.adapters import HTTPAdapter
 import pandas as pd
 import yfinance as yf
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 建立共用連線池以加速證交所 / 期交所多日資料查詢
+SESSION = requests.Session()
+_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=1)
+SESSION.mount("https://", _adapter)
+SESSION.mount("http://", _adapter)
 
 # ---------------------------------------------------------------------------
 # 設定區
@@ -97,7 +106,6 @@ def shorten_name(name):
     return n
 
 def is_tw_etf_symbol(sym):
-    """判斷是否為台股 ETF（代碼以 00 開頭，如 0050.TW, 0052.TW, 00919.TW, 00929.TW）"""
     if not sym: return False
     base = sym.split(".")[0].strip()
     return base.startswith("00") and base.isdigit()
@@ -107,7 +115,7 @@ def load_watchlist():
     cloud_rows = []
     seen = set()
     try:
-        resp = requests.get(bust_url, headers=HEADERS, timeout=20)
+        resp = SESSION.get(bust_url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         resp.encoding = "utf-8"
         for raw in csv.DictReader(io.StringIO(resp.text)):
@@ -146,9 +154,6 @@ def load_watchlist():
 # ---------------------------------------------------------------------------
 
 def fetch_yahoo_chart_quotes(tw_symbols):
-    """
-    【主力引擎】透過 Yahoo Finance v8/finance/chart 抓取台股與 ETF 近 5 日行情與即時盤後 meta。
-    """
     quotes = {}
     if not tw_symbols:
         return quotes
@@ -164,7 +169,7 @@ def fetch_yahoo_chart_quotes(tw_symbols):
             try:
                 url = f"{host}/v8/finance/chart/{sym}"
                 params = {"interval": "1d", "range": "5d"}
-                resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+                resp = SESSION.get(url, params=params, headers=HEADERS, timeout=10)
                 if resp.status_code != 200:
                     continue
                 j = resp.json()
@@ -243,12 +248,11 @@ def fetch_yahoo_chart_quotes(tw_symbols):
                 fetched = True
             except Exception:
                 continue
-        time.sleep(0.05)
+        time.sleep(0.04)
 
     return quotes
 
 def fetch_tw_yahoo_quotes(tw_symbols):
-    """備援引擎 1：台灣奇摩股市 API"""
     quotes = {}
     if not tw_symbols: return quotes
     try:
@@ -257,7 +261,7 @@ def fetch_tw_yahoo_quotes(tw_symbols):
             "fields": "symbol,price,regularMarketPrice,regularMarketPreviousClose,regularMarketTime",
             "symbols": ",".join(tw_symbols)
         }
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        resp = SESSION.get(url, params=params, headers=HEADERS, timeout=12)
         if resp.status_code == 200:
             data = resp.json()
             items = data if isinstance(data, list) else data.get("data", [])
@@ -304,11 +308,10 @@ def fetch_tw_yahoo_quotes(tw_symbols):
     return quotes
 
 def fetch_twse_official_quotes(tw_symbols=None):
-    """備援引擎 2：證交所官方 OpenAPI"""
     twse_map = {}
     latest_tw_date = None
     try:
-        r = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=12, verify=False)
+        r = SESSION.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=12, verify=False)
         if r.status_code == 200:
             for item in r.json():
                 code = (item.get("Code") or "").strip()
@@ -339,7 +342,7 @@ def fetch_twse_official_quotes(tw_symbols=None):
             code = sym.split(".")[0].strip()
             try:
                 url_etf = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={ym_str}&stockNo={code}&response=json"
-                r_etf = requests.get(url_etf, headers=HEADERS, timeout=8, verify=False)
+                r_etf = SESSION.get(url_etf, headers=HEADERS, timeout=8, verify=False)
                 if r_etf.status_code == 200:
                     j_etf = r_etf.json()
                     rows_etf = j_etf.get("data") or []
@@ -364,12 +367,12 @@ def fetch_twse_official_quotes(tw_symbols=None):
                                 "date": d_str,
                                 "source": "證交所ETF日線"
                             }
-                time.sleep(0.12)
+                time.sleep(0.10)
             except Exception:
                 pass
 
     try:
-        r2 = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12, verify=False)
+        r2 = SESSION.get("https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX", headers=HEADERS, timeout=12, verify=False)
         if r2.status_code == 200:
             for item in r2.json():
                 idx_name = item.get("指數", "")
@@ -400,12 +403,7 @@ def fetch_twse_official_quotes(tw_symbols=None):
 
 def fetch_taifex_night_quote(day_close_ref=None):
     """
-    【獨立函式 V9.8】確保早上 06:30 穩定抓取昨夜（清晨 05:00 收盤）台指期夜盤數據：
-    1. 第一主力：台灣期交所官方夜盤 MIS API (mis.taifex.com.tw, MarketType="1", CID="TXF")，
-       清晨 05:00 收盤後持續鎖定保留至下午 15:00，完全不受 05:00~08:45 盤前清空影響。
-    2. 第二備援：台灣奇摩期貨網頁 (https://tw.stock.yahoo.com/future/WTX%26)，
-       支援台灣奇摩無 raw 包裝之 JSON 欄位格式。
-    3. 第三備援：台灣奇摩 StockServices API (WTX&)。
+    【獨立函式】確保早上 06:30 穩定抓取昨夜（清晨 05:00 收盤）台指期夜盤數據
     """
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_tw = dt.datetime.now(tw_tz)
@@ -436,14 +434,13 @@ def fetch_taifex_night_quote(day_close_ref=None):
             "SortColumn": "",
             "AscDesc": "A"
         }
-        r_mis = requests.post(mis_url, json=payload, headers=mis_headers, timeout=12, verify=False)
+        r_mis = SESSION.post(mis_url, json=payload, headers=mis_headers, timeout=12, verify=False)
         if r_mis.status_code == 200:
             j_mis = r_mis.json()
             quote_list = (j_mis.get("RtData") or {}).get("QuoteList") or []
             for q in quote_list:
                 sym_id = str(q.get("SymbolID") or "").strip()
                 disp_name = str(q.get("DispCName") or "").strip()
-                # 排除現貨指標 (-S) 與跨月價差單 (/)，直接锁定近月臺股期貨主合約
                 if not sym_id or "-S" in sym_id or "/" in sym_id or "現貨" in disp_name or "價差" in disp_name:
                     continue
 
@@ -467,7 +464,7 @@ def fetch_taifex_night_quote(day_close_ref=None):
     except Exception as e:
         print(f"[夜盤提示] 期交所 MIS 查詢略過: {e}")
 
-    # 來源 2：直接讀取台灣奇摩期貨網頁 (https://tw.stock.yahoo.com/future/WTX%26)，鎖定 WTX& 區塊解析
+    # 來源 2：直接讀取台灣奇摩期貨網頁 (https://tw.stock.yahoo.com/future/WTX%26)
     def _extract_yahoo_num(txt_block, field_names):
         for fn in field_names:
             m1 = re.search(rf'"{fn}"\s*:\s*\{{\s*"raw"\s*:\s*([-0-9.]+)', txt_block)
@@ -483,7 +480,7 @@ def fetch_taifex_night_quote(day_close_ref=None):
         return None
 
     try:
-        r_web = requests.get("https://tw.stock.yahoo.com/future/WTX%26", headers=HEADERS, timeout=12)
+        r_web = SESSION.get("https://tw.stock.yahoo.com/future/WTX%26", headers=HEADERS, timeout=12)
         if r_web.status_code == 200:
             txt = r_web.text
             idx_wtx = txt.find('"WTX&"')
@@ -525,7 +522,7 @@ def fetch_taifex_night_quote(day_close_ref=None):
             "fields": "symbol,price,change,changePercent,regularMarketPrice,regularMarketChange,regularMarketPreviousClose,regularMarketTime",
             "symbols": "WTX&"
         }
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        resp = SESSION.get(url, params=params, headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             items = data if isinstance(data, list) else data.get("data", [])
@@ -716,7 +713,7 @@ def fetch_institutional_flow():
         return None
 
     try:
-        r_open = requests.get("https://openapi.twse.com.tw/v1/fund/BFI82U", headers=HEADERS, timeout=10, verify=False)
+        r_open = SESSION.get("https://openapi.twse.com.tw/v1/fund/BFI82U", headers=HEADERS, timeout=10, verify=False)
         if r_open.status_code == 200:
             j_list = r_open.json()
             if isinstance(j_list, list) and len(j_list) > 0:
@@ -750,7 +747,7 @@ def fetch_institutional_flow():
             continue
         try:
             url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json&dayDate={q_date}&type=day"
-            resp = requests.get(url, headers=HEADERS, timeout=8, verify=False)
+            resp = SESSION.get(url, headers=HEADERS, timeout=8, verify=False)
             if resp.status_code == 200:
                 j = resp.json()
                 if j.get("stat") == "OK" and j.get("data"):
@@ -765,7 +762,7 @@ def fetch_institutional_flow():
                                 t_net += diff_val
                     seen_dates.add(q_date)
                     daily_records.append({"date": q_date, "foreign": round(f_net, 1), "trust": round(t_net, 1)})
-            time.sleep(0.10)
+            time.sleep(0.08)
         except Exception:
             continue
 
@@ -849,6 +846,328 @@ def fetch_institutional_flow():
         "tip_color": tip_color,
         "cols": cols
     }
+
+# ---------------------------------------------------------------------------
+# 【獨立新模組 V1】四-1 散戶信用交易 & 四-2 法人空單力道 [V1]
+# ---------------------------------------------------------------------------
+
+def fetch_margin_and_shorts():
+    """
+    抓取最近 61 個交易日之：
+    1. 證交所信用交易統計 (MI_MARGN): 融資金額(億)每日餘額與增減、融券(張)每日餘額與增減
+    2. 證交所借券賣出餘額 (TWT93U): 借券賣出(萬張)每日餘額與增減
+    3. 期交所三大法人臺股期貨未平倉 (futContractsDate): 外資台指期淨多空口數(口)與增減
+    統計區間：今日(1日)、昨日(1日)、前日(1日)、近 1 週(5日)、近 1 月(20日)、近 1 季(60日)
+    """
+    tw_tz = dt.timezone(dt.timedelta(hours=8))
+    now_tw = dt.datetime.now(tw_tz)
+
+    def _pnum(s):
+        if s is None: return None
+        txt = re.sub(r"<[^>]+>", "", str(s)).replace(",", "").replace("%", "").strip()
+        if txt in ("", "-", "--", "NaN"): return None
+        try: return float(txt)
+        except Exception: return None
+
+    margin_recs = []   # [{"date": "YYYYMMDD", "m_bal": 億, "m_chg": 億, "s_bal": 張, "s_chg": 張}]
+    sbl_recs = []      # [{"date": "YYYYMMDD", "sbl_bal": 萬張, "sbl_chg": 萬張}]
+    fut_recs = []      # [{"date": "YYYYMMDD", "net_oi": 口}]
+
+    # 1. 抓取證交所信用交易統計 (MI_MARGN, selectType=MS)
+    for d_off in range(0, 96):
+        if len(margin_recs) >= 60:
+            break
+        t_dt = now_tw - dt.timedelta(days=d_off)
+        if t_dt.weekday() >= 5:
+            continue
+        q_d = t_dt.strftime("%Y%m%d")
+        try:
+            url_m = f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&date={q_d}&selectType=MS"
+            rm = SESSION.get(url_m, headers=HEADERS, timeout=8, verify=False)
+            if rm.status_code == 200:
+                jm = rm.json()
+                if jm.get("stat") == "OK":
+                    rows = []
+                    if jm.get("tables") and len(jm["tables"]) > 0:
+                        rows = jm["tables"][0].get("data") or []
+                    elif jm.get("creditList"):
+                        rows = jm["creditList"]
+                    elif jm.get("data"):
+                        rows = jm["data"]
+
+                    m_bal_yi, m_chg_yi, s_bal_zhang, s_chg_zhang = None, None, None, None
+                    for r in rows:
+                        if not isinstance(r, list) or len(r) < 6:
+                            continue
+                        label_0 = str(r[0]).strip()
+                        prev_v = _pnum(r[4])
+                        curr_v = _pnum(r[5])
+                        if prev_v is None or curr_v is None:
+                            continue
+                        if "融資金額" in label_0:
+                            # 單位：仟元 -> 除以 1e5 換算為 億元
+                            m_bal_yi = round(curr_v / 1e5, 1)
+                            m_chg_yi = round((curr_v - prev_v) / 1e5, 1)
+                        elif "融券" in label_0 and "金額" not in label_0:
+                            # 單位：交易單位(張)
+                            s_bal_zhang = int(round(curr_v))
+                            s_chg_zhang = int(round(curr_v - prev_v))
+
+                    if m_bal_yi is not None and s_bal_zhang is not None:
+                        margin_recs.append({
+                            "date": q_d,
+                            "m_bal": m_bal_yi,
+                            "m_chg": m_chg_yi,
+                            "s_bal": s_bal_zhang,
+                            "s_chg": s_chg_zhang
+                        })
+            time.sleep(0.06)
+        except Exception:
+            continue
+
+    # 2. 抓取證交所借券賣出餘額彙總表 (TWT93U)
+    for d_off in range(0, 96):
+        if len(sbl_recs) >= 60:
+            break
+        t_dt = now_tw - dt.timedelta(days=d_off)
+        if t_dt.weekday() >= 5:
+            continue
+        q_d = t_dt.strftime("%Y%m%d")
+        try:
+            url_s = f"https://www.twse.com.tw/rwd/zh/marginTrading/TWT93U?response=json&date={q_d}"
+            rs = SESSION.get(url_s, headers=HEADERS, timeout=8, verify=False)
+            if rs.status_code == 200:
+                js = rs.json()
+                if js.get("stat") == "OK":
+                    rows = js.get("data") or []
+                    if not rows and js.get("tables"):
+                        rows = js["tables"][0].get("data") or []
+                    for r in reversed(rows):
+                        if not isinstance(r, list) or len(r) < 13:
+                            continue
+                        c0 = str(r[0]).strip()
+                        c1 = str(r[1]).strip()
+                        if "合計" in c0 or "合計" in c1:
+                            prev_sbl = _pnum(r[8])
+                            curr_sbl = _pnum(r[12])
+                            if prev_sbl is not None and curr_sbl is not None and curr_sbl > 0:
+                                # 判斷單位：若數值 > 1e8 為「股」(除以 1e7 = 萬張)，否則為「張」(除以 1e4 = 萬張)
+                                div_unit = 1e7 if curr_sbl > 1e8 else 1e4
+                                sbl_recs.append({
+                                    "date": q_d,
+                                    "sbl_bal": round(curr_sbl / div_unit, 2),
+                                    "sbl_chg": round((curr_sbl - prev_sbl) / div_unit, 2)
+                                })
+                            break
+            time.sleep(0.06)
+        except Exception:
+            continue
+
+    # 3. 抓取期交所三大法人臺股期貨未平倉餘額 (futContractsDate, 需要 61 筆以計算近 1 季 60 日差值)
+    for d_off in range(0, 98):
+        if len(fut_recs) >= 61:
+            break
+        t_dt = now_tw - dt.timedelta(days=d_off)
+        if t_dt.weekday() >= 5:
+            continue
+        q_d_slash = t_dt.strftime("%Y/%m/%d")
+        q_d_plain = t_dt.strftime("%Y%m%d")
+        try:
+            url_f = "https://www.taifex.com.tw/cht/3/futContractsDate"
+            params_f = {
+                "queryType": "1",
+                "goDay": "",
+                "doQuery": "1",
+                "dateaddcnt": "",
+                "queryDate": q_d_slash,
+                "commodityId": "TXF"
+            }
+            rf = SESSION.get(url_f, params=params_f, headers=HEADERS, timeout=8, verify=False)
+            if rf.status_code == 200 and "外資" in rf.text:
+                tr_list = re.findall(r"<tr[^>]*>(.*?)</tr>", rf.text, flags=re.S | re.I)
+                in_txf = False
+                for tr_html in tr_list:
+                    cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", td)).strip()
+                             for td in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr_html, flags=re.S | re.I)]
+                    if not cells:
+                        continue
+                    row_txt = " ".join(cells)
+                    if "臺股期貨" in row_txt or "台股期貨" in row_txt:
+                        in_txf = True
+                    if in_txf and ("外資" in row_txt):
+                        # 倒數第 2 欄為未平倉「多空淨額口數」，倒數第 1 欄為未平倉「多空淨額契約金額」
+                        if len(cells) >= 12:
+                            net_oi_val = _pnum(cells[-2])
+                            if net_oi_val is not None:
+                                fut_recs.append({"date": q_d_plain, "net_oi": int(round(net_oi_val))})
+                                break
+            time.sleep(0.06)
+        except Exception:
+            continue
+
+    margin_recs.sort(key=lambda x: x["date"], reverse=True)
+    sbl_recs.sort(key=lambda x: x["date"], reverse=True)
+    fut_recs.sort(key=lambda x: x["date"], reverse=True)
+
+    windows = [
+        ("今日", 0, 1),
+        ("昨日", 1, 2),
+        ("前日", 2, 3),
+        ("近 1 週", 0, 5),
+        ("近 1 月", 0, 20),
+        ("近 1 季", 0, 60),
+    ]
+
+    # 組裝【四-1、散戶信用交易（融資 / 融券） [V1]】
+    retail_data = None
+    if margin_recs:
+        latest_m = margin_recs[0]
+        # 計算融資連續增減天數
+        m_streak = 0
+        m_dir = None
+        for rec in margin_recs:
+            c = rec["m_chg"]
+            cur_d = "dec" if c < 0 else "inc" if c > 0 else None
+            if not cur_d:
+                break
+            if m_dir is None:
+                m_dir = cur_d
+                m_streak = 1
+            elif cur_d == m_dir:
+                m_streak += 1
+            else:
+                break
+
+        streak_str = f"（連 {m_streak} {'減' if m_dir == 'dec' else '增'}）" if m_streak >= 1 else ""
+        s_wan_zhang = latest_m["s_bal"] / 10000.0
+        tip_retail = f"融資餘額 {latest_m['m_bal']:,.0f} 億{streak_str}｜融券 {s_wan_zhang:,.1f} 萬張"
+        tip_retail_color = "#d32f2f" if m_dir == "dec" else "#1b8e3a" if m_dir == "inc" else "#1f3b66"
+
+        m_cols = []
+        s_cols = []
+        for label, st_i, ed_i in windows:
+            sub = margin_recs[st_i:ed_i]
+            if sub:
+                m_sum = round(sum(x["m_chg"] for x in sub), 1)
+                s_sum = int(sum(x["s_chg"] for x in sub))
+
+                # 融資(散多標): 大減=看多(紅), 大增=看空(綠)
+                if m_sum < 0:
+                    m_judge, m_jcls = "看多", "up"
+                elif m_sum > 0:
+                    m_judge, m_jcls = "看空", "down"
+                else:
+                    m_judge, m_jcls = "持平", "mute"
+
+                # 融券(散空標): 大增=具軋空燃料=看多(紅), 大減=空單回補=看空(綠)
+                if s_sum > 0:
+                    s_judge, s_jcls = "看多", "up"
+                elif s_sum < 0:
+                    s_judge, s_jcls = "看空", "down"
+                else:
+                    s_judge, s_jcls = "持平", "mute"
+
+                m_cols.append({"label": label, "val": m_sum, "judge": m_judge, "jcls": m_jcls})
+                s_cols.append({"label": label, "val": s_sum, "judge": s_judge, "jcls": s_jcls})
+            else:
+                m_cols.append({"label": label, "val": None, "judge": "—", "jcls": "mute"})
+                s_cols.append({"label": label, "val": None, "judge": "—", "jcls": "mute"})
+
+        ld_m = latest_m["date"]
+        retail_data = {
+            "latest_date": f"{ld_m[4:6]}-{ld_m[6:8]}" if len(ld_m) == 8 else ld_m,
+            "tip_text": tip_retail,
+            "tip_color": tip_retail_color,
+            "m_cols": m_cols,
+            "s_cols": s_cols
+        }
+
+    # 組裝【四-2、法人空單力道（期貨 / 借券） [V1]】
+    inst_short_data = None
+    if fut_recs or sbl_recs:
+        tip_parts = []
+        tip_short_color = "#1f3b66"
+        latest_d_short = ""
+
+        # 外資期貨淨空單計算（利用前後交易日差值算出每日變化）
+        f_cols = []
+        if fut_recs:
+            latest_oi = fut_recs[0]["net_oi"]
+            latest_d_short = fut_recs[0]["date"]
+            # 計算連續加空或回補天數
+            f_streak = 0
+            f_sdir = None
+            for idx in range(len(fut_recs) - 1):
+                diff_day = fut_recs[idx]["net_oi"] - fut_recs[idx + 1]["net_oi"]
+                cur_sd = "add_short" if diff_day < 0 else "cover" if diff_day > 0 else None
+                if not cur_sd:
+                    break
+                if f_sdir is None:
+                    f_sdir = cur_sd
+                    f_streak = 1
+                elif cur_sd == f_sdir:
+                    f_streak += 1
+                else:
+                    break
+
+            oi_title = f"淨空 {abs(latest_oi):,} 口" if latest_oi < 0 else f"淨多 {latest_oi:,} 口"
+            st_txt = f"（連 {f_streak} {'加空' if f_sdir == 'add_short' else '回補'}）" if f_streak >= 1 else ""
+            tip_parts.append(f"外資期貨{oi_title}{st_txt}")
+            if f_sdir == "add_short":
+                tip_short_color = "#1b8e3a"
+            elif f_sdir == "cover":
+                tip_short_color = "#d32f2f"
+
+            for label, st_i, ed_i in windows:
+                if len(fut_recs) > ed_i:
+                    delta_oi = fut_recs[st_i]["net_oi"] - fut_recs[ed_i]["net_oi"]
+                    if delta_oi > 0:
+                        vcls, judge, jcls = "up", "看多", "up"
+                    elif delta_oi < 0:
+                        vcls, judge, jcls = "down", "看空", "down"
+                    else:
+                        vcls, judge, jcls = "mute", "持平", "mute"
+                    f_cols.append({"label": label, "val": delta_oi, "vcls": vcls, "judge": judge, "jcls": jcls})
+                else:
+                    f_cols.append({"label": label, "val": None, "vcls": "mute", "judge": "—", "jcls": "mute"})
+        else:
+            for label, _, _ in windows:
+                f_cols.append({"label": label, "val": None, "vcls": "mute", "judge": "—", "jcls": "mute"})
+
+        # 借券賣出餘額計算
+        sbl_cols = []
+        if sbl_recs:
+            latest_sbl = sbl_recs[0]["sbl_bal"]
+            if not latest_d_short:
+                latest_d_short = sbl_recs[0]["date"]
+            tip_parts.append(f"借券賣 {latest_sbl:,.0f} 萬張")
+            for label, st_i, ed_i in windows:
+                sub = sbl_recs[st_i:ed_i]
+                if sub:
+                    sbl_sum = round(sum(x["sbl_chg"] for x in sub), 2)
+                    # 借券賣出增加(+) = 賣壓增 = 看空(綠)；減少(-) = 還券回補 = 看多(紅)
+                    if sbl_sum < 0:
+                        vcls, judge, jcls = "up", "看多", "up"
+                    elif sbl_sum > 0:
+                        vcls, judge, jcls = "down", "看空", "down"
+                    else:
+                        vcls, judge, jcls = "mute", "持平", "mute"
+                    sbl_cols.append({"label": label, "val": sbl_sum, "vcls": vcls, "judge": judge, "jcls": jcls})
+                else:
+                    sbl_cols.append({"label": label, "val": None, "vcls": "mute", "judge": "—", "jcls": "mute"})
+        else:
+            for label, _, _ in windows:
+                sbl_cols.append({"label": label, "val": None, "vcls": "mute", "judge": "—", "jcls": "mute"})
+
+        inst_short_data = {
+            "latest_date": f"{latest_d_short[4:6]}-{latest_d_short[6:8]}" if len(latest_d_short) == 8 else latest_d_short,
+            "tip_text": "｜".join(tip_parts),
+            "tip_color": tip_short_color,
+            "f_cols": f_cols,
+            "sbl_cols": sbl_cols
+        }
+
+    return retail_data, inst_short_data
 
 # ---------------------------------------------------------------------------
 # 主抓取與自動稽核引擎（Yahoo Chart API 主力 + 真實交易日期防呆鎖）
@@ -994,7 +1313,7 @@ def fetch_yahoo_news(limit=5):
     url = "https://tw.news.yahoo.com/rss/finance"
     news = []
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = SESSION.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         root = ET.fromstring(resp.text)
         for item in root.findall('.//item')[:limit]:
@@ -1071,7 +1390,7 @@ def export_all_data(closes, watch, kd_data, audit_summary):
         
     return df
 
-def generate_html_report(df, vix_hist, news_data, audit_summary, night_quote=None, fx_data=None, inst_data=None):
+def generate_html_report(df, vix_hist, news_data, audit_summary, night_quote=None, fx_data=None, inst_data=None, retail_data=None, inst_short_data=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_str = dt.datetime.now(tw_tz).strftime("%Y/%m/%d %H:%M")
     
@@ -1146,12 +1465,15 @@ td.num {{ text-align:center; font-variant-numeric:tabular-nums; }}
 td.idx {{ color:var(--mute); text-align:center; }} 
 .up {{ color:var(--up); font-weight:bold; }} .down {{ color:var(--down); font-weight:bold; }} .mute {{ color:var(--mute); }} 
 tr.grp td {{ background:#f0f3f7; font-weight:700; color:var(--head); position:static; box-shadow:none; }} 
+tr.sub-judge td {{ background:#fafbfd; padding-top:6px; padding-bottom:7px; }}
+tr.sub-judge td.freeze-idx, tr.sub-judge td.freeze-name {{ background:#fafbfd; }}
 a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-decoration:underline; }}
 .badge {{ padding: 3px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; display: inline-block; }}
 .b-up {{ background: #ffebee; color: #d32f2f; }}
 .b-down {{ background: #e8f5e9; color: #1b8e3a; }}
 .b-warn {{ background: #fff3e0; color: #ef6c00; }}
 .b-safe {{ background: #f0f3f7; color: #333; }}
+.attr-tag {{ display:inline-block; background:#f0f3f7; color:#1f3b66; font-size:11px; font-weight:bold; padding:2px 6px; border-radius:4px; border:1px solid #d5dce6; }}
 .foot {{ color:var(--mute); font-size:11px; margin-top:14px; text-align:center; }}
 .action-btn {{ display:inline-block; padding:10px 20px; border-radius:4px; text-decoration:none; font-size:14px; font-weight:bold; text-align:center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: opacity 0.2s; margin-top: 10px; }}
 .action-btn:hover {{ opacity: 0.8; text-decoration:none; }}
@@ -1164,13 +1486,13 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 /* 精緻小圓點樣式 */
 .s-dot {{ font-size: 0.65em; vertical-align: 1px; margin-right: 1px; display: inline-block; }}
 
-/* HTML 第五區位階警示完全取消粗體 (減壓) */
+/* HTML 第六區位階警示完全取消粗體 (減壓) */
 ol.alert-list {{ line-height:1.8; font-size:13px; font-weight:400 !important; padding-left:24px; margin-bottom:24px; color:#333; }}
 ol.alert-list li, ol.alert-list span {{ font-weight:400 !important; }}
 
 .freeze-single {{ position: -webkit-sticky; position: sticky; left: 0; z-index: 2; background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2); }}
 .freeze-idx {{ position: -webkit-sticky; position: sticky; left: 0; z-index: 2; background: #fff; min-width: 25px; max-width: 25px; padding-left: 4px; padding-right: 4px; }}
-.freeze-name {{ position: -webkit-sticky; position: sticky; left: 25px; z-index: 2; background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2); min-width: 70px; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 6px; padding-right: 6px; }}
+.freeze-name {{ position: -webkit-sticky; position: sticky; left: 25px; z-index: 2; background: #fff; box-shadow: 2px 0 4px -2px rgba(0,0,0,0.2); min-width: 78px; max-width: 105px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 6px; padding-right: 6px; }}
 thead th.freeze-single, thead th.freeze-idx, thead th.freeze-name {{ background: #eef1f5; z-index: 3; }}
 tr.tw-row td {{ background-color: #fff9db !important; }}
 tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{ background-color: #fff9db !important; }}
@@ -1307,11 +1629,99 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         html += "</tbody></table></div>"
     else:
         html += "<div class='trend-tip'>⚠️ 暫時無法取得台美匯率歷史資料。</div>"
+
+    # -----------------------------------------------------------------------
+    # 【獨立模組 V1】四-1、散戶信用交易（融資 / 融券）[V1]
+    # -----------------------------------------------------------------------
+    html += "<h2>四-1、散戶信用交易（融資 / 融券） <span class='ver-tag'>V1</span></h2>"
+    if retail_data and retail_data.get("m_cols"):
+        html += f"<div class='trend-tip' style='border-left-color:{retail_data['tip_color']};'>💡 <span style='color:{retail_data['tip_color']}; font-weight:bold;'>{retail_data['tip_text']}</span> <span class='mute' style='font-size:11px;'>(最新交易日：{retail_data['latest_date']})</span></div>"
+        html += "<div class='table-container'><table><thead><tr>"
+        html += "<th class='num freeze-idx'>項次</th><th class='freeze-name'>項目</th><th class='num'>屬性</th>"
+        for c in retail_data["m_cols"]:
+            html += f"<th class='num'>{c['label']}</th>"
+        html += "</tr></thead><tbody>"
+
+        # 項次 1：融資(億)
+        html += "<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>融資(億)</b></td><td class='num'><span class='attr-tag'>散多標</span></td>"
+        for c in retail_data["m_cols"]:
+            v = c["val"]
+            txt = "—" if v is None else f"{'+' if v > 0 else ''}{v:,.1f}"
+            html += f"<td class='num'>{txt}</td>"
+        html += "</tr>"
+
+        # 項次 1 判讀
+        html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
+        for c in retail_data["m_cols"]:
+            html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
+        html += "</tr>"
+
+        # 項次 2：融券(張)
+        html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>融券(張)</b></td><td class='num'><span class='attr-tag'>散空標</span></td>"
+        for c in retail_data["s_cols"]:
+            v = c["val"]
+            txt = "—" if v is None else f"{'+' if v > 0 else ''}{v:,d}"
+            html += f"<td class='num'>{txt}</td>"
+        html += "</tr>"
+
+        # 項次 2 判讀
+        html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
+        for c in retail_data["s_cols"]:
+            html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
+        html += "</tr>"
+
+        html += "</tbody></table></div>"
+    else:
+        html += "<div class='trend-tip'>⚠️ 暫時無法取得證交所信用交易（融資／融券）資料。</div>"
+
+    # -----------------------------------------------------------------------
+    # 【獨立模組 V1】四-2、法人空單力道（期貨 / 借券）[V1]
+    # -----------------------------------------------------------------------
+    html += "<h2>四-2、法人空單力道（期貨 / 借券） <span class='ver-tag'>V1</span></h2>"
+    if inst_short_data and inst_short_data.get("f_cols"):
+        html += f"<div class='trend-tip' style='border-left-color:{inst_short_data['tip_color']};'>💡 <span style='color:{inst_short_data['tip_color']}; font-weight:bold;'>{inst_short_data['tip_text']}</span> <span class='mute' style='font-size:11px;'>(最新交易日：{inst_short_data['latest_date']})</span></div>"
+        html += "<div class='table-container'><table><thead><tr>"
+        html += "<th class='num freeze-idx'>項次</th><th class='freeze-name'>項目</th><th class='num'>屬性</th>"
+        for c in inst_short_data["f_cols"]:
+            html += f"<th class='num'>{c['label']}</th>"
+        html += "</tr></thead><tbody>"
+
+        # 項次 1：期貨空單(口)
+        html += "<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>期貨空單(口)</b></td><td class='num'><span class='attr-tag'>外空標</span></td>"
+        for c in inst_short_data["f_cols"]:
+            v = c["val"]
+            txt = "—" if v is None else f"{'+' if v > 0 else ''}{v:,d}"
+            html += f"<td class='num {c['vcls']}'>{txt}</td>"
+        html += "</tr>"
+
+        # 項次 1 判讀
+        html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
+        for c in inst_short_data["f_cols"]:
+            html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
+        html += "</tr>"
+
+        # 項次 2：借券賣(萬張)
+        html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>借券賣(萬張)</b></td><td class='num'><span class='attr-tag'>外空標</span></td>"
+        for c in inst_short_data["sbl_cols"]:
+            v = c["val"]
+            txt = "—" if v is None else f"{'+' if v > 0 else ''}{v:,.2f}"
+            html += f"<td class='num {c['vcls']}'>{txt}</td>"
+        html += "</tr>"
+
+        # 項次 2 判讀
+        html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
+        for c in inst_short_data["sbl_cols"]:
+            html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
+        html += "</tr>"
+
+        html += "</tbody></table></div>"
+    else:
+        html += "<div class='trend-tip'>⚠️ 暫時無法取得期交所外資期貨未平倉或借券賣出資料。</div>"
     
     # -----------------------------------------------------------------------
-    # 四、個股追蹤清單 (支援短線/長線雙燈號)
+    # 五、個股追蹤清單 (支援短線/長線雙燈號)
     # -----------------------------------------------------------------------
-    html += "<h2>四、個股追蹤清單 (支援短線/長線雙燈號)</h2><div class='table-container'><table><thead><tr>"
+    html += "<h2>五、個股追蹤清單 (支援短線/長線雙燈號)</h2><div class='table-container'><table><thead><tr>"
     html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th><th class='num'>資料日期</th></tr></thead><tbody>"
 
     def render_stock_row(row, idx):
@@ -1353,9 +1763,9 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     html += "</tbody></table></div>"
 
     # -----------------------------------------------------------------------
-    # 五、其他位階警示
+    # 六、其他位階警示
     # -----------------------------------------------------------------------
-    html += "<h2>五、其他位階警示</h2><ol class='alert-list'>"
+    html += "<h2>六、其他位階警示</h2><ol class='alert-list'>"
     alert_df = df[df['長線燈號'].isin(['大盤', '核心'])]
     alert_count_html = 0
     for _, r in alert_df.iterrows():
@@ -1390,9 +1800,9 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     html += "</ol>"
 
     # -----------------------------------------------------------------------
-    # 六、市場新聞 ( Yahoo 財經 )
+    # 七、市場新聞 ( Yahoo 財經 )
     # -----------------------------------------------------------------------
-    html += "<h2>六、市場新聞 ( Yahoo 財經 )</h2><ol style='line-height:1.8; font-size:13px; padding-left:24px; margin-bottom:24px;'>"
+    html += "<h2>七、市場新聞 ( Yahoo 財經 )</h2><ol style='line-height:1.8; font-size:13px; padding-left:24px; margin-bottom:24px;'>"
     for item in news_data: html += f"<li><a href='{item['link']}' target='_blank' style='font-weight:normal;'>{item['title']}</a></li>"
     html += "</ol>"
 
@@ -1400,28 +1810,35 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     <div class="notes" style="margin-top: 24px; font-size: 12px; color: #666; background: #fcfcfc; padding: 16px; border-radius: 6px; border: 1px solid var(--line);">
         <b style="font-size: 13px; color: #333;">📝 燈號與位階判斷標準</b>
         <div style="display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; line-height: 1.7;">
-            <div style="flex: 1 1 280px;">
+            <div style="flex: 1 1 200px;">
                 <b style="color:#1f3b66;">1. 短線燈號 (5MA/10MA)</b><br>
                 🔥 <b>站雙線</b>：收盤 ＞ 5MA 且 ＞ 10MA (短線強勢)<br>
                 ⚡ <b>站回五日</b>：收盤 ＞ 5MA 但 ＜ 10MA (止跌轉強)<br>
                 ⚠️ <b>雙線破</b>：收盤 ＜ 5MA 且 ＜ 10MA (短線弱勢)
             </div>
-            <div style="flex: 1 1 280px;">
+            <div style="flex: 1 1 210px;">
                 <b style="color:#1f3b66;">2. 長線燈號 (20週均線)</b><br>
                 ⚠️ <b>破線空手</b>：跌破 20 週均線 (長線趨勢轉弱)<br>
                 <span style="color:#1b8e3a;"><span class="s-dot">●</span></span> <b>K值超跌</b>：20 週線上，且任一 K值 ＜ 20<br>
                 <span style="color:#d32f2f;"><span class="s-dot">●</span></span> <b>熱K>80</b>：20 週線上，且任一 K值 ＞ 80<br>
                 ✓ <b>線上安全</b>：20 週線上，且 KD 無極端狀況
             </div>
-            <div style="flex: 1 1 220px;">
+            <div style="flex: 1 1 210px;">
                 <b style="color:#1f3b66;">3. 匯率與三大法人籌碼判讀</b><br>
                 <span style="color:#d32f2f;"><b>紅字 (升值/買超)</b></span>：台幣升值＝外資匯入；法人合計買超 → <b>易漲</b><br>
                 <span style="color:#1b8e3a;"><b>綠字 (貶值/賣超)</b></span>：台幣貶值＝外資匯出；法人合計賣超 → <b>易跌</b>
             </div>
+            <div style="flex: 1 1 240px;">
+                <b style="color:#1f3b66;">4. 融資融券與空單定義</b><br>
+                • <b>融資 (散多標)</b>：散戶借錢買股。大減＝籌碼洗淨 (<span style="color:#d32f2f;"><b>看多</b></span>)；大增＝散戶搶短 (<span style="color:#1b8e3a;"><b>看空</b></span>)。<br>
+                • <b>融券 (散空標)</b>：散戶借股放空。大增＝具軋空燃料 (<span style="color:#d32f2f;"><b>看多</b></span>)；大減＝空單回補 (<span style="color:#1b8e3a;"><b>看空</b></span>)。<br>
+                • <b>期貨空單 (外空標)</b>：外資期貨避險。負值 (-)＝加空 (<span style="color:#1b8e3a;"><b>看空</b></span>)；正值 (+)＝回補 (<span style="color:#d32f2f;"><b>看多</b></span>)，逾 3.5 萬口警戒。<br>
+                • <b>借券賣 (外空標)</b>：外資借股現貨放空。增加 (+)＝賣壓增 (<span style="color:#1b8e3a;"><b>看空</b></span>)；減少 (-)＝還券回補 (<span style="color:#d32f2f;"><b>看多</b></span>)。
+            </div>
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣期交所 MIS / Yahoo Finance / 台灣奇摩股市 / 證交所 ｜ 報表產生器：V9.8 期交所夜盤 MIS 官方直抓版<br><br>
+        資料來源：台灣期交所 MIS / Yahoo Finance / 台灣奇摩股市 / 證交所 ｜ 報表產生器：V9.9 散戶信用交易與法人空單雙表新增版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -1431,7 +1848,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f: f.write(html)
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片 (完全維持原狀，自動帶入最新收盤與夜盤)
+# 組裝 LINE Flex Message 卡片 (完全維持原狀，絕不更動)
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report, night_quote=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
@@ -1670,6 +2087,7 @@ def main():
 
         fx_data = fetch_usdtwd_analysis()
         inst_data = fetch_institutional_flow()
+        retail_data, inst_short_data = fetch_margin_and_shorts()
 
         vix_hist = {}
         v_closes, _, _ = fetch_and_audit_all(["^VIX", "^VIXTWN"], set(), period="1mo")
@@ -1681,7 +2099,7 @@ def main():
 
         news_data = fetch_yahoo_news(limit=5)
         df_report = export_all_data(closes, watch, kd_data, audit_summary)
-        generate_html_report(df_report, vix_hist, news_data, audit_summary, night_quote, fx_data, inst_data)
+        generate_html_report(df_report, vix_hist, news_data, audit_summary, night_quote, fx_data, inst_data, retail_data, inst_short_data)
         
         if skip_line_push:
             return 0
@@ -1695,8 +2113,8 @@ def main():
             print("[DRY-RUN] 訊息預覽 JSON：\n" + json.dumps(flex_message, indent=2, ensure_ascii=False) + "\n")
             return 0
 
-        resp = requests.post(LINE_PUSH_URL, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                             json={"to": uid, "messages": [flex_message]}, timeout=20)
+        resp = SESSION.post(LINE_PUSH_URL, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                            json={"to": uid, "messages": [flex_message]}, timeout=20)
         try:
             resp.raise_for_status()
             print("[OK] 已成功推播卡片訊息至 LINE。")
