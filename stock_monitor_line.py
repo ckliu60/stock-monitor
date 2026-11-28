@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股／台股監控推播系統 (V9.9 散戶信用交易與法人空單雙表新增版)
+美股／台股監控推播系統 (V10.0 落底訊號雙端同步、ETF純數字代碼與三日總數對照版)
 ---------------------------------------------------------------------------
-更新日誌 (V9.9):
-1. [新增四-1 散戶信用交易 V1] 抓取證交所融資餘額(億)與融券(張)近 60 交易日變化，標示「散多標 / 散空標」並於每列下方直接顯示「看多 / 看空」判讀。
-2. [新增四-2 法人空單力道 V1] 抓取期交所外資台指期淨空單(口)與證交所借券賣出(萬張)近 60 交易日變化，標示「外空標」並於每列下方直接顯示「看多 / 看空」判讀。
-3. [註明欄與標題順延] 網頁底部「燈號與位階判斷標準」新增第 4 欄指標白話定義；其餘區塊標題依序調整為五、六、七。
-4. [零干擾保證] LINE 卡片 (build_flex_message)、台指夜盤期交所 MIS 直抓、Yahoo Chart API 台股/ETF 實價同步完全維持 V9.8 原狀。
+更新日誌 (V10.0):
+1. [新增落底訊號 (10MA/月線)] 嚴格限定僅針對「台大盤 (^TWII)、0050、台積電 (2330)、聯發科 (2454)」四檔計算（美股與其他標的顯示 —）；當 10 日線穿過月線時，於 HTML 與 LINE 卡片同步顯示「🟢 10日穿月線 (落底反轉)」。
+2. [台股 ETF 純數字代碼顯示] 凡 00 開頭之台股 ETF（如 0050、0052、00878、00919、00929），於 HTML 網頁與 LINE 卡片一律強制顯示純數字代碼，不顯示中文字。
+3. [四-1 與 四-2 三日總數對照] 於提示列直接並列顯示「今 / 昨 / 前」三日之融資餘額、融券餘額、外資期貨淨空口數與借券賣餘額總數。
 """
 
 import os
@@ -53,11 +52,14 @@ INDICES = [
     ("^SOX", "費半"),
 ]
 
+# 嚴格限定僅此 4 檔計算「落底訊號 (10MA/月線)」（美股與其他標的皆不適用）
+BOTTOM_SIGNAL_TARGETS = {"^TWII", "0050.TW", "2330.TW", "2454.TW"}
+
 DEFAULT_WATCHLIST = [
     {"market": "台股", "code": "2330", "yf_symbol": "2330.TW", "name": "台積", "group": "核心"},
     {"market": "台股", "code": "2454", "yf_symbol": "2454.TW", "name": "聯發科", "group": "核心"},
     {"market": "台股", "code": "0050", "yf_symbol": "0050.TW", "name": "0050", "group": "核心"},
-    {"market": "台股", "code": "0052", "yf_symbol": "0052.TW", "name": "富邦科技", "group": "觀察"},
+    {"market": "台股", "code": "0052", "yf_symbol": "0052.TW", "name": "0052", "group": "觀察"},
     {"market": "台股", "code": "00919", "yf_symbol": "00919.TW", "name": "00919", "group": "觀察"},
     {"market": "台股", "code": "00929", "yf_symbol": "00929.TW", "name": "00929", "group": "觀察"},
     {"market": "台股", "code": "1303", "yf_symbol": "1303.TW", "name": "南亞", "group": "觀察"},
@@ -95,20 +97,23 @@ HEADERS = {
 # 工具函式與雲端清單讀取
 # ---------------------------------------------------------------------------
 
-def shorten_name(name):
-    n = name.strip()
-    if "群益台灣精選高息" in n: return "00919"
-    if "復華台灣科技優息" in n: return "00929"
-    if "元大台灣50" in n: return "0050"
+def is_tw_etf_symbol(sym):
+    """判斷是否為台股 ETF（代碼以 00 開頭，如 0050、0052、00878、00919、00929、00631L）"""
+    if not sym:
+        return False
+    base = str(sym).split(".")[0].strip().upper()
+    return base.startswith("00") and len(base) >= 4
+
+def shorten_name(name, code="", market=""):
+    """台股 ETF 一律強制顯示純數字代碼（如 00878、00919、0052），其餘依規則精簡"""
+    clean_code = str(code).split(".")[0].strip().upper()
+    if market == "台股" and is_tw_etf_symbol(clean_code):
+        return clean_code
+    n = str(name or "").strip()
     if n == "台積電ADR": return "台積電R"
     if n == "台積電": return "台積"
     if n == "台股大盤": return "台大盤"
     return n
-
-def is_tw_etf_symbol(sym):
-    if not sym: return False
-    base = sym.split(".")[0].strip()
-    return base.startswith("00") and base.isdigit()
 
 def load_watchlist():
     bust_url = f"{SHEET_CSV_URL}&_t={int(time.time())}"
@@ -119,8 +124,8 @@ def load_watchlist():
         resp.raise_for_status()
         resp.encoding = "utf-8"
         for raw in csv.DictReader(io.StringIO(resp.text)):
-            code = (raw.get("code") or "").strip()
-            yf_symbol = (raw.get("yf_symbol") or "").strip()
+            code = (raw.get("code") or "").strip().upper()
+            yf_symbol = (raw.get("yf_symbol") or "").strip().upper()
             market = (raw.get("market") or "").strip()
             group = (raw.get("長線燈號") or raw.get("group") or "觀察").strip()
             
@@ -128,7 +133,10 @@ def load_watchlist():
             if code in ["^DJI", "^IXIC", "^GSPC", "^SOX", "^TWII"] or group == "大盤": continue
             if market != "台股": market = "美股"
 
-            if market == "台股" and code.isdigit() and len(code) in (2, 3): code = code.zfill(4)
+            if market == "台股" and yf_symbol.startswith("00"):
+                code = yf_symbol.split(".")[0]
+            elif market == "台股" and code.isdigit() and len(code) in (2, 3):
+                code = code.zfill(4)
 
             if not yf_symbol:
                 yf_symbol = f"{code}.TW" if market == "台股" else code.replace(".", "-")
@@ -139,15 +147,21 @@ def load_watchlist():
             seen.add(yf_symbol)
 
             original_name = (raw.get("name") or yf_symbol).strip()
+            display_name = shorten_name(original_name, code=code, market=market)
             cloud_rows.append({
                 "market": market, "code": code or yf_symbol, "yf_symbol": yf_symbol,
-                "name": shorten_name(original_name), "group": group
+                "name": display_name, "group": group
             })
     except Exception as e:
         print(f"[提示] 讀取雲端試算表異常: {e}", file=sys.stderr)
 
     if cloud_rows: return cloud_rows
-    return [item.copy() for item in DEFAULT_WATCHLIST]
+    out_def = []
+    for item in DEFAULT_WATCHLIST:
+        cp = item.copy()
+        cp["name"] = shorten_name(cp["name"], code=cp["code"], market=cp["market"])
+        out_def.append(cp)
+    return out_def
 
 # ---------------------------------------------------------------------------
 # 台股與 ETF 精準多源採集 & 台指夜盤官方直抓獨立函式
@@ -572,7 +586,7 @@ def fetch_taifex_night_quote(day_close_ref=None):
     return None
 
 # ---------------------------------------------------------------------------
-# 【獨立新模組 V1】台美匯率與外資動向 (USD/TWD) [V1]
+# 【獨立新模組 V1】三、台美匯率與外資動向 (USD/TWD) [V1]
 # ---------------------------------------------------------------------------
 
 def fetch_usdtwd_analysis():
@@ -679,7 +693,7 @@ def fetch_usdtwd_analysis():
         return None
 
 # ---------------------------------------------------------------------------
-# 【獨立新模組 V1】外資與投信買賣超（單位：億元）[V1]
+# 【獨立新模組 V1】二、外資與投信買賣超（單位：億元）[V1]
 # ---------------------------------------------------------------------------
 
 def fetch_institutional_flow():
@@ -848,17 +862,10 @@ def fetch_institutional_flow():
     }
 
 # ---------------------------------------------------------------------------
-# 【獨立新模組 V1】四-1 散戶信用交易 & 四-2 法人空單力道 [V1]
+# 【獨立新模組 V1】四-1 散戶信用交易 & 四-2 法人空單力道（含三日總數對照）
 # ---------------------------------------------------------------------------
 
 def fetch_margin_and_shorts():
-    """
-    抓取最近 61 個交易日之：
-    1. 證交所信用交易統計 (MI_MARGN): 融資金額(億)每日餘額與增減、融券(張)每日餘額與增減
-    2. 證交所借券賣出餘額 (TWT93U): 借券賣出(萬張)每日餘額與增減
-    3. 期交所三大法人臺股期貨未平倉 (futContractsDate): 外資台指期淨多空口數(口)與增減
-    統計區間：今日(1日)、昨日(1日)、前日(1日)、近 1 週(5日)、近 1 月(20日)、近 1 季(60日)
-    """
     tw_tz = dt.timezone(dt.timedelta(hours=8))
     now_tw = dt.datetime.now(tw_tz)
 
@@ -905,11 +912,9 @@ def fetch_margin_and_shorts():
                         if prev_v is None or curr_v is None:
                             continue
                         if "融資金額" in label_0:
-                            # 單位：仟元 -> 除以 1e5 換算為 億元
                             m_bal_yi = round(curr_v / 1e5, 1)
                             m_chg_yi = round((curr_v - prev_v) / 1e5, 1)
                         elif "融券" in label_0 and "金額" not in label_0:
-                            # 單位：交易單位(張)
                             s_bal_zhang = int(round(curr_v))
                             s_chg_zhang = int(round(curr_v - prev_v))
 
@@ -951,7 +956,6 @@ def fetch_margin_and_shorts():
                             prev_sbl = _pnum(r[8])
                             curr_sbl = _pnum(r[12])
                             if prev_sbl is not None and curr_sbl is not None and curr_sbl > 0:
-                                # 判斷單位：若數值 > 1e8 為「股」(除以 1e7 = 萬張)，否則為「張」(除以 1e4 = 萬張)
                                 div_unit = 1e7 if curr_sbl > 1e8 else 1e4
                                 sbl_recs.append({
                                     "date": q_d,
@@ -963,7 +967,7 @@ def fetch_margin_and_shorts():
         except Exception:
             continue
 
-    # 3. 抓取期交所三大法人臺股期貨未平倉餘額 (futContractsDate, 需要 61 筆以計算近 1 季 60 日差值)
+    # 3. 抓取期交所三大法人臺股期貨未平倉餘額 (futContractsDate)
     for d_off in range(0, 98):
         if len(fut_recs) >= 61:
             break
@@ -995,7 +999,6 @@ def fetch_margin_and_shorts():
                     if "臺股期貨" in row_txt or "台股期貨" in row_txt:
                         in_txf = True
                     if in_txf and ("外資" in row_txt):
-                        # 倒數第 2 欄為未平倉「多空淨額口數」，倒數第 1 欄為未平倉「多空淨額契約金額」
                         if len(cells) >= 12:
                             net_oi_val = _pnum(cells[-2])
                             if net_oi_val is not None:
@@ -1022,7 +1025,6 @@ def fetch_margin_and_shorts():
     retail_data = None
     if margin_recs:
         latest_m = margin_recs[0]
-        # 計算融資連續增減天數
         m_streak = 0
         m_dir = None
         for rec in margin_recs:
@@ -1039,8 +1041,15 @@ def fetch_margin_and_shorts():
                 break
 
         streak_str = f"（連 {m_streak} {'減' if m_dir == 'dec' else '增'}）" if m_streak >= 1 else ""
-        s_wan_zhang = latest_m["s_bal"] / 10000.0
-        tip_retail = f"融資餘額 {latest_m['m_bal']:,.0f} 億{streak_str}｜融券 {s_wan_zhang:,.1f} 萬張"
+        m_t0 = f"{margin_recs[0]['m_bal']:,.0f}"
+        m_t1 = f"{margin_recs[1]['m_bal']:,.0f}" if len(margin_recs) >= 2 else "—"
+        m_t2 = f"{margin_recs[2]['m_bal']:,.0f}" if len(margin_recs) >= 3 else "—"
+
+        s_t0 = f"{margin_recs[0]['s_bal'] / 10000.0:,.1f}"
+        s_t1 = f"{margin_recs[1]['s_bal'] / 10000.0:,.1f}" if len(margin_recs) >= 2 else "—"
+        s_t2 = f"{margin_recs[2]['s_bal'] / 10000.0:,.1f}" if len(margin_recs) >= 3 else "—"
+
+        tip_retail = f"融資餘額：今 {m_t0} / 昨 {m_t1} / 前 {m_t2} 億{streak_str}｜融券餘額：今 {s_t0} / 昨 {s_t1} / 前 {s_t2} 萬張"
         tip_retail_color = "#d32f2f" if m_dir == "dec" else "#1b8e3a" if m_dir == "inc" else "#1f3b66"
 
         m_cols = []
@@ -1051,7 +1060,6 @@ def fetch_margin_and_shorts():
                 m_sum = round(sum(x["m_chg"] for x in sub), 1)
                 s_sum = int(sum(x["s_chg"] for x in sub))
 
-                # 融資(散多標): 大減=看多(紅), 大增=看空(綠)
                 if m_sum < 0:
                     m_judge, m_jcls = "看多", "up"
                 elif m_sum > 0:
@@ -1059,7 +1067,6 @@ def fetch_margin_and_shorts():
                 else:
                     m_judge, m_jcls = "持平", "mute"
 
-                # 融券(散空標): 大增=具軋空燃料=看多(紅), 大減=空單回補=看空(綠)
                 if s_sum > 0:
                     s_judge, s_jcls = "看多", "up"
                 elif s_sum < 0:
@@ -1089,12 +1096,10 @@ def fetch_margin_and_shorts():
         tip_short_color = "#1f3b66"
         latest_d_short = ""
 
-        # 外資期貨淨空單計算（利用前後交易日差值算出每日變化）
         f_cols = []
         if fut_recs:
             latest_oi = fut_recs[0]["net_oi"]
             latest_d_short = fut_recs[0]["date"]
-            # 計算連續加空或回補天數
             f_streak = 0
             f_sdir = None
             for idx in range(len(fut_recs) - 1):
@@ -1110,9 +1115,15 @@ def fetch_margin_and_shorts():
                 else:
                     break
 
-            oi_title = f"淨空 {abs(latest_oi):,} 口" if latest_oi < 0 else f"淨多 {latest_oi:,} 口"
+            def _fmt_oi_num(v):
+                return f"{abs(v):,}" if v <= 0 else f"淨多{v:,}"
+
+            oi_label = "外資期貨淨空" if latest_oi <= 0 else "外資期貨部位"
+            f_t0 = _fmt_oi_num(fut_recs[0]["net_oi"])
+            f_t1 = _fmt_oi_num(fut_recs[1]["net_oi"]) if len(fut_recs) >= 2 else "—"
+            f_t2 = _fmt_oi_num(fut_recs[2]["net_oi"]) if len(fut_recs) >= 3 else "—"
             st_txt = f"（連 {f_streak} {'加空' if f_sdir == 'add_short' else '回補'}）" if f_streak >= 1 else ""
-            tip_parts.append(f"外資期貨{oi_title}{st_txt}")
+            tip_parts.append(f"{oi_label}：今 {f_t0} / 昨 {f_t1} / 前 {f_t2} 口{st_txt}")
             if f_sdir == "add_short":
                 tip_short_color = "#1b8e3a"
             elif f_sdir == "cover":
@@ -1134,18 +1145,18 @@ def fetch_margin_and_shorts():
             for label, _, _ in windows:
                 f_cols.append({"label": label, "val": None, "vcls": "mute", "judge": "—", "jcls": "mute"})
 
-        # 借券賣出餘額計算
         sbl_cols = []
         if sbl_recs:
-            latest_sbl = sbl_recs[0]["sbl_bal"]
             if not latest_d_short:
                 latest_d_short = sbl_recs[0]["date"]
-            tip_parts.append(f"借券賣 {latest_sbl:,.0f} 萬張")
+            sbl_t0 = f"{sbl_recs[0]['sbl_bal']:,.0f}"
+            sbl_t1 = f"{sbl_recs[1]['sbl_bal']:,.0f}" if len(sbl_recs) >= 2 else "—"
+            sbl_t2 = f"{sbl_recs[2]['sbl_bal']:,.0f}" if len(sbl_recs) >= 3 else "—"
+            tip_parts.append(f"借券賣餘額：今 {sbl_t0} / 昨 {sbl_t1} / 前 {sbl_t2} 萬張")
             for label, st_i, ed_i in windows:
                 sub = sbl_recs[st_i:ed_i]
                 if sub:
                     sbl_sum = round(sum(x["sbl_chg"] for x in sub), 2)
-                    # 借券賣出增加(+) = 賣壓增 = 看空(綠)；減少(-) = 還券回補 = 看多(紅)
                     if sbl_sum < 0:
                         vcls, judge, jcls = "up", "看多", "up"
                     elif sbl_sum > 0:
@@ -1262,7 +1273,7 @@ def fetch_and_audit_all(symbols, tw_symbols_set, period="2y"):
     return closes, kd_data, audit_summary
 
 # ---------------------------------------------------------------------------
-# 技術指標與輔助
+# 技術指標與輔助（含限定 4 檔之落底訊號計算）
 # ---------------------------------------------------------------------------
 
 def pct(new, old): return None if not old else (new / old - 1.0) * 100.0
@@ -1270,6 +1281,32 @@ def compute_ma(series): return {name: round(float(series.rolling(w).mean().iloc[
 def weekly_ma(series, weeks):
     wk = series.resample("W").last().dropna()
     return round(float(wk.rolling(weeks).mean().iloc[-1]), 2) if len(wk) >= weeks else None
+
+def compute_bottom_signal(series, sym):
+    """
+    計算「落底訊號 (10MA/月線)」：
+    嚴格限定僅針對 台灣大盤 (^TWII)、0050 (0050.TW)、台積電 (2330.TW)、聯發科 (2454.TW) 四檔。
+    美股與其他標的皆不適用，回傳 ("—", "mute", False)。
+    """
+    if sym not in BOTTOM_SIGNAL_TARGETS or series is None or len(series) < 21:
+        return ("—", "mute", False)
+
+    ma10_s = series.rolling(10).mean()
+    ma20_s = series.rolling(20).mean()
+    if pd.isna(ma10_s.iloc[-1]) or pd.isna(ma20_s.iloc[-1]) or pd.isna(ma10_s.iloc[-2]) or pd.isna(ma20_s.iloc[-2]):
+        return ("—", "mute", False)
+
+    ma10_now = float(ma10_s.iloc[-1])
+    ma20_now = float(ma20_s.iloc[-1])
+    ma10_prev = float(ma10_s.iloc[-2])
+    ma20_prev = float(ma20_s.iloc[-2])
+
+    if ma10_prev < ma20_prev and ma10_now >= ma20_now:
+        return ("🟢 10日穿月線 (落底反轉)", "up", True)
+    elif ma10_now >= ma20_now:
+        return ("✓ 10MA月線上", "safe", False)
+    else:
+        return ("⏸️ 10MA月線下", "mute", False)
 
 def compute_kd(df, n=9):
     if df is None or len(df) < n: return (None, None)
@@ -1331,7 +1368,7 @@ def fetch_yahoo_news(limit=5):
 def export_all_data(closes, watch, kd_data, audit_summary):
     all_targets = [{"market": "美股", "code": s, "name": n, "yf": s, "group": "大盤"} for s, n in INDICES] + \
                   [{"market": "台股", "code": "^TWII", "name": "台大盤", "yf": "^TWII", "group": "大盤"}] + \
-                  [{"market": w["market"], "code": w["code"], "name": w["name"], "yf": w["yf_symbol"], "group": w["group"]} for w in watch]
+                  [{"market": w["market"], "code": w["code"], "name": shorten_name(w["name"], w["code"], w["market"]), "yf": w["yf_symbol"], "group": w["group"]} for w in watch]
     
     rows = []
     stale_set = audit_summary.get("stale_syms", set())
@@ -1356,9 +1393,12 @@ def export_all_data(closes, watch, kd_data, audit_summary):
         
         audit_flag = "⚠️日期延遲" if sym in stale_set else "✅正常"
         short_status = get_short_term_status(last, ma.get("MA5"), ma.get("MA10"))
+        bot_text, bot_cls, bot_trig = compute_bottom_signal(s, sym)
         
         rows.append({
-            "序號": i, "長線燈號": t["group"], "短線燈號": short_status, "市場": t["market"], "代碼": t["code"],
+            "序號": i, "長線燈號": t["group"], "短線燈號": short_status,
+            "落底訊號": bot_text, "落底樣式": bot_cls, "落底觸發": bot_trig,
+            "市場": t["market"], "代碼": t["code"],
             "名稱": t["name"], "yf_symbol": sym, "最新收盤": round(last, 2),
             "資料日期": s.index[-1].strftime("%Y-%m-%d"), "稽核狀態": audit_flag,
             "當日漲跌": net_1d, "當日%": round(pct_1d, 2) if pct_1d is not None else None,
@@ -1372,19 +1412,20 @@ def export_all_data(closes, watch, kd_data, audit_summary):
     df = pd.DataFrame(rows)
     
     try:
+        excel_df = df.drop(columns=["落底樣式", "落底觸發"], errors="ignore")
         with pd.ExcelWriter(REPORT_EXCEL_PATH, engine='xlsxwriter') as writer:
-            df.to_excel(writer, sheet_name='股市監控報表', index=False)
+            excel_df.to_excel(writer, sheet_name='股市監控報表', index=False)
             workbook, worksheet = writer.book, writer.sheets['股市監控報表']
             white_bg = workbook.add_format({'bg_color': '#FFFFFF'})
             header_format = workbook.add_format({'bold': True, 'text_wrap': True, 'valign': 'center', 'align': 'center', 'fg_color': '#D7E4BC', 'border': 1})
-            for col_num, value in enumerate(df.columns.values): worksheet.write(0, col_num, value, header_format)
-            worksheet.set_column('A:E', 10, white_bg)
-            worksheet.set_column('F:G', 12, white_bg)  
-            worksheet.set_column('H:Z', 10, white_bg)  
-            worksheet.freeze_panes(1, 6)
-            worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
+            for col_num, value in enumerate(excel_df.columns.values): worksheet.write(0, col_num, value, header_format)
+            worksheet.set_column('A:F', 12, white_bg)
+            worksheet.set_column('G:H', 12, white_bg)  
+            worksheet.set_column('I:AA', 10, white_bg)  
+            worksheet.freeze_panes(1, 7)
+            worksheet.autofilter(0, 0, len(excel_df), len(excel_df.columns) - 1)
             tw_format = workbook.add_format({'bg_color': '#FFF9DB'})
-            worksheet.conditional_format(1, 0, len(df), len(df.columns) - 1, {'type': 'formula', 'criteria': '=$D2="台股"', 'format': tw_format})
+            worksheet.conditional_format(1, 0, len(excel_df), len(excel_df.columns) - 1, {'type': 'formula', 'criteria': '=$E2="台股"', 'format': tw_format})
     except Exception as e:
         print(f"[提示] 略過 Excel 匯出: {e}", file=sys.stderr)
         
@@ -1444,6 +1485,15 @@ def generate_html_report(df, vix_hist, news_data, audit_summary, night_quote=Non
         if status_text == "⚡站回五日": return '<span class="badge" style="background:#e3f2fd; color:#1976d2;">⚡站回五日</span>'
         if status_text == "⚠️雙線破": return '<span class="badge b-down">⚠️雙線破</span>'
         return '<span class="mute">—</span>'
+
+    def get_bottom_badge(bot_text, bot_cls):
+        if not bot_text or bot_text == "—":
+            return '<span class="mute">—</span>'
+        if bot_cls == "up":
+            return f'<span class="badge b-up">{bot_text}</span>'
+        if bot_cls == "safe":
+            return f'<span class="badge b-safe">{bot_text}</span>'
+        return f'<span class="badge" style="background:#f5f5f5; color:#777;">{bot_text}</span>'
         
     def get_dist_pct(last, ma20w): return "—" if pd.isna(last) or pd.isna(ma20w) or ma20w == 0 else f"{'+' if ((last - ma20w) / ma20w * 100)>0 else ''}{(last - ma20w) / ma20w * 100:.1f}%"
 
@@ -1481,7 +1531,7 @@ a {{ color:#1456b8; text-decoration:none; font-weight:bold; }} a:hover {{ text-d
 
 /* 獨立模組版本標籤與趨勢提示樣式 */
 .ver-tag {{ display:inline-block; background:#eef1f5; color:#1f3b66; font-size:11px; font-weight:bold; padding:2px 7px; border-radius:4px; margin-left:6px; vertical-align:2px; border:1px solid #d5dce6; }}
-.trend-tip {{ font-size:13px; margin:-6px 0 10px 0; padding:6px 10px; background:#fff; border-left:4px solid #1f3b66; border-radius:4px; border-top:1px solid var(--line); border-right:1px solid var(--line); border-bottom:1px solid var(--line); }}
+.trend-tip {{ font-size:13px; margin:-6px 0 10px 0; padding:6px 10px; background:#fff; border-left:4px solid #1f3b66; border-radius:4px; border-top:1px solid var(--line); border-right:1px solid var(--line); border-bottom:1px solid var(--line); line-height:1.6; }}
 
 /* 精緻小圓點樣式 */
 .s-dot {{ font-size: 0.65em; vertical-align: 1px; margin-right: 1px; display: inline-block; }}
@@ -1503,7 +1553,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
 <h2>一、大盤與 VIX 狀況 (+/- 2%)</h2>
 <div class='table-container'><table>
 <thead><tr>
-    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>資料日期</th>
+    <th class='freeze-single'>指數</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>落底訊號 (10MA/月線)</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>資料日期</th>
 </tr></thead><tbody>
 """
     
@@ -1516,6 +1566,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         weather = get_weather_icon(pct_val, 2.0)
         short_status_text = get_short_term_status(last, ma5, ma10)
         short_badge = get_short_badge(short_status_text)
+        bot_badge = get_bottom_badge(row['落底訊號'], row['落底樣式'])
         ma5_10_str = f"{ma5:,.0f} / {ma10:,.0f}" if pd.notna(ma5) and pd.notna(ma10) else "—"
         status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         bg_cls = "tw-row" if row['市場'] == '台股' else ""
@@ -1524,7 +1575,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         html += f"<tr class='{bg_cls}'><td class='freeze-single'><a href='https://finance.yahoo.com/quote/{row['yf_symbol']}' target='_blank'>{row['名稱']}</a></td>"
         html += f"<td class='num'>{last:,.0f}</td>"
         html += fmt_net(net, is_idx=True) + fmt_pct_td(pct_val)
-        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{status}</td><td class='num mute'>{d_tag}</td></tr>"
+        html += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{bot_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{status}</td><td class='num mute'>{d_tag}</td></tr>"
 
         # 緊接在「台大盤」下方插入「台指夜盤」
         if row['yf_symbol'] == '^TWII':
@@ -1537,18 +1588,18 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
                 html += f"<tr class='tw-row'><td class='freeze-single'><a href='https://tw.stock.yahoo.com/future/WTX%26' target='_blank'>台指夜盤</a></td>"
                 html += f"<td class='num'>{np:,.0f}</td>"
                 html += fmt_net(ndiff, is_idx=True) + fmt_pct_td(npct)
-                html += f"<td class='num'>{n_weather}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'><span class='badge b-safe'>夜盤收盤</span></td><td class='num mute'>{n_date_tag}</td></tr>"
+                html += f"<td class='num'>{n_weather}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'><span class='badge b-safe'>夜盤收盤</span></td><td class='num mute'>{n_date_tag}</td></tr>"
             else:
-                html += f"<tr class='tw-row'><td class='freeze-single'>台指夜盤</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無盤後</td><td class='num mute'>—</td></tr>"
+                html += f"<tr class='tw-row'><td class='freeze-single'>台指夜盤</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無盤後</td><td class='num mute'>—</td></tr>"
 
     for v_name, v_sym in [("美 VIX", "^VIX"), ("台 VIX", "^VIXTWN")]:
         h = vix_hist.get(v_sym, [0])
         val = h[0]
         if val is None or val <= 0:
-            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td><td class='num mute'>—</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>暫無報價</td><td class='num mute'>—</td></tr>"
         else:
             status = "<span class='badge b-down'><span class='s-dot'>●</span> 安全</span>" if val < 35 else "<span class='badge b-up'><span class='s-dot'>●</span> 恐慌</span>"
-            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td><td class='num mute'>—</td></tr>"
+            html += f"<tr><td class='freeze-single'>{v_name}</td><td class='num'>{val:.2f}</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num mute'>—</td><td class='num'>{status}</td><td class='num mute'>—</td></tr>"
             
     html += "</tbody></table></div>"
 
@@ -1642,7 +1693,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<th class='num'>{c['label']}</th>"
         html += "</tr></thead><tbody>"
 
-        # 項次 1：融資(億)
         html += "<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>融資(億)</b></td><td class='num'><span class='attr-tag'>散多標</span></td>"
         for c in retail_data["m_cols"]:
             v = c["val"]
@@ -1650,13 +1700,11 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<td class='num'>{txt}</td>"
         html += "</tr>"
 
-        # 項次 1 判讀
         html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
         for c in retail_data["m_cols"]:
             html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
         html += "</tr>"
 
-        # 項次 2：融券(張)
         html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>融券(張)</b></td><td class='num'><span class='attr-tag'>散空標</span></td>"
         for c in retail_data["s_cols"]:
             v = c["val"]
@@ -1664,7 +1712,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<td class='num'>{txt}</td>"
         html += "</tr>"
 
-        # 項次 2 判讀
         html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
         for c in retail_data["s_cols"]:
             html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
@@ -1686,7 +1733,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<th class='num'>{c['label']}</th>"
         html += "</tr></thead><tbody>"
 
-        # 項次 1：期貨空單(口)
         html += "<tr><td class='num idx freeze-idx'>1</td><td class='freeze-name'><b>期貨空單(口)</b></td><td class='num'><span class='attr-tag'>外空標</span></td>"
         for c in inst_short_data["f_cols"]:
             v = c["val"]
@@ -1694,13 +1740,11 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<td class='num {c['vcls']}'>{txt}</td>"
         html += "</tr>"
 
-        # 項次 1 判讀
         html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
         for c in inst_short_data["f_cols"]:
             html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
         html += "</tr>"
 
-        # 項次 2：借券賣(萬張)
         html += "<tr><td class='num idx freeze-idx'>2</td><td class='freeze-name'><b>借券賣(萬張)</b></td><td class='num'><span class='attr-tag'>外空標</span></td>"
         for c in inst_short_data["sbl_cols"]:
             v = c["val"]
@@ -1708,7 +1752,6 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
             html += f"<td class='num {c['vcls']}'>{txt}</td>"
         html += "</tr>"
 
-        # 項次 2 判讀
         html += "<tr class='sub-judge'><td class='num idx freeze-idx'>↳</td><td class='freeze-name mute'>判讀</td><td class='num mute'>—</td>"
         for c in inst_short_data["sbl_cols"]:
             html += f"<td class='num {c['jcls']}'>{c['judge']}</td>"
@@ -1719,10 +1762,10 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         html += "<div class='trend-tip'>⚠️ 暫時無法取得期交所外資期貨未平倉或借券賣出資料。</div>"
     
     # -----------------------------------------------------------------------
-    # 五、個股追蹤清單 (支援短線/長線雙燈號)
+    # 五、個股追蹤清單 (支援短線/落底/長線三燈號)
     # -----------------------------------------------------------------------
     html += "<h2>五、個股追蹤清單 (支援短線/長線雙燈號)</h2><div class='table-container'><table><thead><tr>"
-    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th><th class='num'>資料日期</th></tr></thead><tbody>"
+    html += "<th class='num freeze-idx'>#</th><th class='freeze-name'>名稱</th><th class='num'>收盤</th><th class='num'>當日漲跌</th><th class='num'>漲跌幅(%)</th><th class='num'>當日燈號</th><th class='num'>股價位階</th><th class='num'>短線燈號</th><th class='num'>落底訊號 (10MA/月線)</th><th class='num'>5MA/10MA</th><th class='num'>長線燈號</th><th class='num'>日/週/月 K值</th><th class='num'>MA20週均</th><th class='num'>距20週均(%)</th><th class='num'>資料日期</th></tr></thead><tbody>"
 
     def render_stock_row(row, idx):
         last, net, pct_val = row['最新收盤'], row['當日漲跌'], row['當日%']
@@ -1734,6 +1777,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         long_status = get_status_badge(last, ma20w, kd_d, kd_w, kd_m)
         short_status_text = get_short_term_status(last, ma5, ma10)
         short_badge = get_short_badge(short_status_text)
+        bot_badge = get_bottom_badge(row['落底訊號'], row['落底樣式'])
         dist_str = get_dist_pct(last, ma20w)
         
         kd_str = f"{int(kd_d) if pd.notna(kd_d) else '-'}/{int(kd_w) if pd.notna(kd_w) else '-'}/{int(kd_m) if pd.notna(kd_m) else '-'}"
@@ -1746,16 +1790,16 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         
         res = f"<tr class='{bg_cls}'><td class='num idx freeze-idx'>{idx}</td><td class='name freeze-name'><a href='{url}' target='_blank'>{row['名稱']}</a></td><td class='num'>{last:,.2f}</td>"
         res += fmt_net(net, is_idx=False) + fmt_pct_td(pct_val)
-        res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{long_status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td><td class='num mute'>{d_tag}</td></tr>"
+        res += f"<td class='num'>{weather}</td><td class='num'>{pos}</td><td class='num'>{short_badge}</td><td class='num'>{bot_badge}</td><td class='num'>{ma5_10_str}</td><td class='num'>{long_status}</td><td class='num'>{kd_str}</td><td class='num'>{ma20w_str}</td><td class='num { 'up' if '+' in dist_str else 'down' }'>{dist_str}</td><td class='num mute'>{d_tag}</td></tr>"
         return res
 
-    html += "<tr class='grp'><td colspan='14'>美股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='15'>美股觀察區</td></tr>"
     idx = 1
     for _, row in us_stocks.iterrows():
         html += render_stock_row(row, idx)
         idx += 1
         
-    html += "<tr class='grp'><td colspan='14'>台股觀察區</td></tr>"
+    html += "<tr class='grp'><td colspan='15'>台股觀察區</td></tr>"
     for _, row in tw_stocks.iterrows():
         html += render_stock_row(row, idx)
         idx += 1
@@ -1780,15 +1824,19 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         if pd.notna(r['日K']) and r['日K'] > 80: ko80.append("日")
         if pd.notna(r['週K']) and r['週K'] > 80: ko80.append("週")
         if pd.notna(r['月K']) and r['月K'] > 80: ko80.append("月")
+
+        bot_trig = bool(r.get('落底觸發', False))
         
-        if drop or ko80:
+        if drop or ko80 or bot_trig:
             short_s = r['短線燈號']
             short_html = ""
             if short_s != "—":
-                s_color = "#d32f2f" if "站上" in short_s else "#1b8e3a" if "破" in short_s else "#1976d2"
+                s_color = "#d32f2f" if "站" in short_s else "#1b8e3a" if "破" in short_s else "#1976d2"
                 short_html = f" ｜ <span style='color:{s_color}; font-weight:400;'>{short_s}</span>"
 
             li_html = f"<li style='font-weight:400;'>{r['名稱']}: "
+            if bot_trig:
+                li_html += f"<span style='color:#d32f2f; font-weight:400;'>{r['落底訊號']}</span> "
             if drop: li_html += " ".join(drop) + " "
             if ko80: li_html += f"<span style='color:#d32f2f; font-weight:400;'><span class='s-dot'>●</span>[熱]{'/'.join(ko80)}K>80</span>"
             li_html += short_html
@@ -1810,20 +1858,21 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     <div class="notes" style="margin-top: 24px; font-size: 12px; color: #666; background: #fcfcfc; padding: 16px; border-radius: 6px; border: 1px solid var(--line);">
         <b style="font-size: 13px; color: #333;">📝 燈號與位階判斷標準</b>
         <div style="display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; line-height: 1.7;">
-            <div style="flex: 1 1 200px;">
-                <b style="color:#1f3b66;">1. 短線燈號 (5MA/10MA)</b><br>
+            <div style="flex: 1 1 210px;">
+                <b style="color:#1f3b66;">1. 短線與落底訊號</b><br>
                 🔥 <b>站雙線</b>：收盤 ＞ 5MA 且 ＞ 10MA (短線強勢)<br>
                 ⚡ <b>站回五日</b>：收盤 ＞ 5MA 但 ＜ 10MA (止跌轉強)<br>
-                ⚠️ <b>雙線破</b>：收盤 ＜ 5MA 且 ＜ 10MA (短線弱勢)
+                ⚠️ <b>雙線破</b>：收盤 ＜ 5MA 且 ＜ 10MA (短線弱勢)<br>
+                🟢 <b>10日穿月線 (落底反轉)</b>：限台大盤、0050、台積電、聯發科，10MA 站上月線視為落底反轉，開始分批投入子彈。
             </div>
-            <div style="flex: 1 1 210px;">
+            <div style="flex: 1 1 205px;">
                 <b style="color:#1f3b66;">2. 長線燈號 (20週均線)</b><br>
                 ⚠️ <b>破線空手</b>：跌破 20 週均線 (長線趨勢轉弱)<br>
                 <span style="color:#1b8e3a;"><span class="s-dot">●</span></span> <b>K值超跌</b>：20 週線上，且任一 K值 ＜ 20<br>
                 <span style="color:#d32f2f;"><span class="s-dot">●</span></span> <b>熱K>80</b>：20 週線上，且任一 K值 ＞ 80<br>
                 ✓ <b>線上安全</b>：20 週線上，且 KD 無極端狀況
             </div>
-            <div style="flex: 1 1 210px;">
+            <div style="flex: 1 1 205px;">
                 <b style="color:#1f3b66;">3. 匯率與三大法人籌碼判讀</b><br>
                 <span style="color:#d32f2f;"><b>紅字 (升值/買超)</b></span>：台幣升值＝外資匯入；法人合計買超 → <b>易漲</b><br>
                 <span style="color:#1b8e3a;"><b>綠字 (貶值/賣超)</b></span>：台幣貶值＝外資匯出；法人合計賣超 → <b>易跌</b>
@@ -1838,7 +1887,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
         </div>
     </div>
     <div class='foot' style='margin-top:20px; font-size:12px;'>
-        資料來源：台灣期交所 MIS / Yahoo Finance / 台灣奇摩股市 / 證交所 ｜ 報表產生器：V9.9 散戶信用交易與法人空單雙表新增版<br><br>
+        資料來源：台灣期交所 MIS / Yahoo Finance / 台灣奇摩股市 / 證交所 ｜ 報表產生器：V10.0 落底訊號雙端同步與三日總數對照版<br><br>
         <div style="display:flex; justify-content:center; align-items:center;">
             <a href='report_data.xlsx' download='stock_monitor.xlsx' class='action-btn btn-download'>📥 下載完整 Excel (.xlsx) 報表</a>
         </div>
@@ -1848,7 +1897,7 @@ tr.tw-row td.freeze-single, tr.tw-row td.freeze-idx, tr.tw-row td.freeze-name {{
     with open(REPORT_HTML_PATH, "w", encoding="utf-8") as f: f.write(html)
 
 # ---------------------------------------------------------------------------
-# 組裝 LINE Flex Message 卡片 (完全維持原狀，絕不更動)
+# 組裝 LINE Flex Message 卡片（同步顯示限定 4 檔之「落底訊號 (10MA/月線)」）
 # ---------------------------------------------------------------------------
 def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_report, night_quote=None):
     tw_tz = dt.timezone(dt.timedelta(hours=8))
@@ -1922,10 +1971,11 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     for w in watch:
         sym = w["yf_symbol"]
         if w["market"] == "台股" and (w["group"] == "核心" or "2330" in sym or "0050" in sym):
-            if "正2" in w["name"] or "反1" in w["name"] or sym in seen_core: continue
+            if "正2" in w["name"] or "反1" in w["name"] or sym.endswith(("L.TW", "R.TW")) or sym in seen_core: continue
             seen_core.add(sym)
-            if add_sec1_item(w["name"], sym, closes.get(sym), False):
-                core_items.append({"name": w["name"], "yf": sym, "last": float(closes.get(sym).iloc[-1]), "ma20w": weekly_ma(closes.get(sym), 20)})
+            disp_n = shorten_name(w["name"], w["code"], w["market"])
+            if add_sec1_item(disp_n, sym, closes.get(sym), False):
+                core_items.append({"name": disp_n, "yf": sym, "last": float(closes.get(sym).iloc[-1]), "ma20w": weekly_ma(closes.get(sym), 20)})
                 
     contents.extend(sec1)
     contents.append({"type": "separator", "margin": "md"})
@@ -1952,14 +2002,14 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     contents.extend(sec2)
     contents.append({"type": "separator", "margin": "md"})
     
-    sec3 = [{"type": "text", "text": "▌三、台股核心指標 (長/短線燈號)", "size": "sm", "color": "#333333"}]
+    sec3 = [{"type": "text", "text": "▌三、台股核心指標 (長/短線/落底燈號)", "size": "sm", "color": "#333333"}]
     for i, item in enumerate(core_items, 1):
         last, ma20w = item["last"], item["ma20w"]
         df_row = df_report[df_report['yf_symbol'] == item["yf"]]
         if df_row.empty: continue
         r = df_row.iloc[0]
         kd_d, kd_w, kd_m, short_status = r['日K'], r['週K'], r['月K'], r['短線燈號']
-        short_color = C_UP if "站上" in short_status else C_DOWN if "破" in short_status else "#1976d2"
+        short_color = C_UP if "站" in short_status else C_DOWN if "破" in short_status else "#1976d2"
         
         sec3.append({"type": "text", "text": f"{i}. {item['name']} ({f'{last:,.0f}' if item['yf']=='^TWII' else f'{last:,.1f}'})", "size": "sm", "color": "#333333", "margin": "sm"})
         sec3.append({
@@ -1969,6 +2019,20 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
                 {"type": "span", "text": short_status, "color": short_color}
             ]
         })
+
+        # 顯示「落底訊號 (10MA/月線)」（限定台大盤、0050、台積電、聯發科）
+        bot_txt = r.get('落底訊號', '—')
+        if bot_txt and bot_txt != "—":
+            bot_cls = r.get('落底樣式', 'mute')
+            bot_color = C_UP if bot_cls == "up" else "#1f3b66" if bot_cls == "safe" else C_FLAT
+            bot_weight = "bold" if bot_cls == "up" else "regular"
+            sec3.append({
+                "type": "text", "size": "sm", "wrap": True,
+                "contents": [
+                    {"type": "span", "text": "   落底訊號 (10MA/月線): ", "color": "#666666"},
+                    {"type": "span", "text": bot_txt, "color": bot_color, "weight": bot_weight}
+                ]
+            })
         
         if last and ma20w:
             dist = (last - ma20w) / ma20w * 100
@@ -1999,9 +2063,11 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
         w_ret, m_ret = r['週%'], r['月%']
         drop_20 = (pd.notna(w_ret) and w_ret <= -20) or (pd.notna(m_ret) and m_ret <= -20)
         ko80 = [k for k, val in zip(["日", "週", "月"], [r['日K'], r['週K'], r['月K']]) if pd.notna(val) and val > 80]
+        bot_trig = bool(r.get('落底觸發', False))
         
-        if drop_q or drop_y or drop_20 or ko80:
+        if drop_q or drop_y or drop_20 or ko80 or bot_trig:
             spans = [{"type": "span", "text": f"📍 {r['名稱']}: ", "weight": "regular"}]
+            if bot_trig: spans.append({"type": "span", "text": f"{r['落底訊號']} ", "color": C_UP, "weight": "bold"})
             if drop_q: spans.extend([{"type": "span", "text": "●", "color": C_DOWN, "size": "xxs", "weight": "regular"}, {"type": "span", "text": "[跌]破季線 ", "color": C_DOWN, "weight": "regular"}])
             if drop_y: spans.extend([{"type": "span", "text": "●", "color": C_UP, "size": "xxs", "weight": "regular"}, {"type": "span", "text": "[跌]破年線 ", "color": C_UP, "weight": "regular"}])
             if drop_20: spans.extend([{"type": "span", "text": "●", "color": C_DOWN, "size": "xxs", "weight": "regular"}, {"type": "span", "text": "週/月跌>20% ", "color": C_DOWN, "weight": "regular"}])
@@ -2009,7 +2075,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
             
             short_s = r['短線燈號']
             if short_s != "—":
-                s_color = C_UP if "站上" in short_s else C_DOWN if "破" in short_s else "#1976d2"
+                s_color = C_UP if "站" in short_s else C_DOWN if "破" in short_s else "#1976d2"
                 spans.extend([{"type": "span", "text": " ｜ ", "weight": "regular"}, {"type": "span", "text": short_s, "color": s_color, "weight": "regular"}])
                 
             block = {"type": "text", "size": "sm", "weight": "regular", "wrap": True, "contents": spans, "margin": "sm"}
@@ -2039,7 +2105,7 @@ def build_flex_message(closes, watch, kd_data, vix_hist, audit_summary, df_repor
     contents.append({
         "type": "text", "size": "xxs", "color": "#8a9099", "wrap": True,
         "contents": [
-            {"type": "span", "text": "💡 短線: 🔥站雙線(>5/10MA)｜⚡站回五日(>5MA)｜⚠️雙線破\n💡 長線: 20週均上為✓安全，破線為⚠️空手｜"},
+            {"type": "span", "text": "💡 短線: 🔥站雙線(>5/10MA)｜⚡站回五日(>5MA)｜⚠️雙線破\n💡 落底(限台大盤/0050/2330/2454): 🟢10日穿月線 (落底反轉)\n💡 長線: 20週均上為✓安全，破線為⚠️空手｜"},
             {"type": "span", "text": "●", "color": C_DOWN, "size": "xxs"}, {"type": "span", "text": "破季線 "},
             {"type": "span", "text": "●", "color": C_UP, "size": "xxs"}, {"type": "span", "text": "破年線"}
         ]
